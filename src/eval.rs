@@ -6,7 +6,7 @@ use std::{
     rc::Rc,
 };
 
-use crate::ast::{Expr, FuncCall, Function, OpKind, Program, Statement, VarName};
+use crate::ast::{Expr, FuncCall, OpKind, Program, Statement, VarName};
 
 #[derive(Debug)]
 pub struct Evaluator {
