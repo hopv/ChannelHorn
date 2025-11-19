@@ -100,7 +100,7 @@ pub struct Clause {
     pub body: Body,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Body {
     pub predicates: Vec<PredicateAtom>,
     pub constraints: Vec<Constraint>,
@@ -141,6 +141,10 @@ impl CHC {
     pub fn init_premitive() -> Self {
         let mut fun_declarations = HashMap::new();
         fun_declarations.insert(SORTED_PREDICATE.to_string(), vec![Type::List]);
+        fun_declarations.insert(
+            MERGE_PREDICATE.to_string(),
+            vec![Type::List, Type::List, Type::List],
+        );
         let mut clauses = vec![];
         let sorted = vec![
             Clause {
@@ -210,6 +214,124 @@ impl CHC {
         ];
 
         clauses.extend(sorted);
+
+        // Merge predicate
+        let merge = vec![
+            Clause {
+                forall: vec![("l".to_string(), Type::List)],
+                head: Some(PredicateAtom {
+                    name: MERGE_PREDICATE.to_string(),
+                    args: vec![
+                        Term::Var("l".to_string()),
+                        Term::Nil,
+                        Term::Var("l".to_string()),
+                    ],
+                }),
+                body: Body::default(),
+            },
+            Clause {
+                forall: vec![("l".to_string(), Type::List)],
+                head: Some(PredicateAtom {
+                    name: MERGE_PREDICATE.to_string(),
+                    args: vec![
+                        Term::Nil,
+                        Term::Var("l".to_string()),
+                        Term::Var("l".to_string()),
+                    ],
+                }),
+                body: Body::default(),
+            },
+            Clause {
+                forall: vec![
+                    ("l1".to_string(), Type::List),
+                    ("l2".to_string(), Type::List),
+                    ("l3".to_string(), Type::List),
+                    ("l1tail".to_string(), Type::List),
+                    ("l3tail".to_string(), Type::List),
+                    ("p".to_string(), Type::Pair),
+                ],
+                head: Some(PredicateAtom {
+                    name: MERGE_PREDICATE.to_string(),
+                    args: vec![
+                        Term::Var("l1".to_string()),
+                        Term::Var("l2".to_string()),
+                        Term::Var("l3".to_string()),
+                    ],
+                }),
+                body: Body {
+                    predicates: vec![PredicateAtom {
+                        name: MERGE_PREDICATE.to_string(),
+                        args: vec![
+                            Term::Var("l1tail".to_string()),
+                            Term::Var("l2".to_string()),
+                            Term::Var("l3tail".to_string()),
+                        ],
+                    }],
+                    constraints: vec![
+                        Constraint::Eq(
+                            Term::Var("l1".to_string()),
+                            Term::Cons(
+                                Term::Var("p".to_string()).into(),
+                                Term::Var("l1tail".to_string()).into(),
+                            ),
+                        ),
+                        Constraint::Eq(
+                            Term::Var("l3".to_string()),
+                            Term::Cons(
+                                Term::Var("p".to_string()).into(),
+                                Term::Var("l3tail".to_string()).into(),
+                            ),
+                        ),
+                    ],
+                },
+            },
+            Clause {
+                forall: vec![
+                    ("l1".to_string(), Type::List),
+                    ("l2".to_string(), Type::List),
+                    ("l3".to_string(), Type::List),
+                    ("l2tail".to_string(), Type::List),
+                    ("l3tail".to_string(), Type::List),
+                    ("p".to_string(), Type::Pair),
+                ],
+                head: Some(PredicateAtom {
+                    name: MERGE_PREDICATE.to_string(),
+                    args: vec![
+                        Term::Var("l1".to_string()),
+                        Term::Var("l2".to_string()),
+                        Term::Var("l3".to_string()),
+                    ],
+                }),
+                body: Body {
+                    predicates: vec![PredicateAtom {
+                        name: MERGE_PREDICATE.to_string(),
+                        args: vec![
+                            Term::Var("l1".to_string()),
+                            Term::Var("l2tail".to_string()),
+                            Term::Var("l3tail".to_string()),
+                        ],
+                    }],
+                    constraints: vec![
+                        Constraint::Eq(
+                            Term::Var("l2".to_string()),
+                            Term::Cons(
+                                Term::Var("p".to_string()).into(),
+                                Term::Var("l2tail".to_string()).into(),
+                            ),
+                        ),
+                        Constraint::Eq(
+                            Term::Var("l3".to_string()),
+                            Term::Cons(
+                                Term::Var("p".to_string()).into(),
+                                Term::Var("l3tail".to_string()).into(),
+                            ),
+                        ),
+                    ],
+                },
+            },
+        ];
+
+        clauses.extend(merge);
 
         CHC {
             clauses,
