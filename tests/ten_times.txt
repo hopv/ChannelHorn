@@ -1,0 +1,12 @@
+init = main()
+
+main() = new s1, r in proc1(s1, r)
+proc1(s1: Sender, r: Receiver) = spawn(proc2(s1, 0)); proc3(r, 0, 0)
+proc2(s1: Sender, count: int) = if count < 10 then proc2_1(s1, count) else unit()
+proc2_1(s1: Sender, count: int) = send count to s1; proc2(s1, count + 1)
+proc3(r: Receiver, sum: int, count: int) = let v = recv r in proc4(r, sum + v, count + 1)
+proc4(r: Receiver, sum: int, count: int) = if count < 10 then proc3(r, sum, count) else assert(sum == 45)
+
+assert(cond: int) = if cond then unit() else fail()
+unit() = ()
+fail() = fail

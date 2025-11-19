@@ -123,7 +123,14 @@ impl ast::Expr {
                 let term2 = expr2.lower_to_chc(ctx)?;
                 match op_kind {
                     ast::OpKind::Add => Term::Add(Box::new(term1), Box::new(term2)),
+                    ast::OpKind::Sub => Term::Sub(Box::new(term1), Box::new(term2)),
+                    ast::OpKind::Mul => Term::Mul(Box::new(term1), Box::new(term2)),
                     ast::OpKind::Eq => Term::Eq(Box::new(term1), Box::new(term2)),
+                    ast::OpKind::Ne => Term::Ne(Box::new(term1), Box::new(term2)),
+                    ast::OpKind::Lt => Term::Lt(Box::new(term1), Box::new(term2)),
+                    ast::OpKind::Le => Term::Le(Box::new(term1), Box::new(term2)),
+                    ast::OpKind::Gt => Term::Gt(Box::new(term1), Box::new(term2)),
+                    ast::OpKind::Ge => Term::Ge(Box::new(term1), Box::new(term2)),
                 }
             }
         })

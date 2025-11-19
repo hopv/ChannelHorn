@@ -25,9 +25,16 @@ pub enum Term {
     Var(VarName),
     Int(i32),
     Add(Box<Term>, Box<Term>),
+    Sub(Box<Term>, Box<Term>),
+    Mul(Box<Term>, Box<Term>),
     Bool(bool),
     LOr(Box<Term>, Box<Term>),
     Eq(Box<Term>, Box<Term>),
+    Ne(Box<Term>, Box<Term>),
+    Lt(Box<Term>, Box<Term>),
+    Le(Box<Term>, Box<Term>),
+    Gt(Box<Term>, Box<Term>),
+    Ge(Box<Term>, Box<Term>),
     Cons(Box<Term>, Box<Term>),
     Nil,
     Head(Box<Term>),
@@ -46,8 +53,15 @@ impl Term {
                 }
             }
             Term::Add(lhs, rhs)
+            | Term::Sub(lhs, rhs)
+            | Term::Mul(lhs, rhs)
             | Term::LOr(lhs, rhs)
             | Term::Eq(lhs, rhs)
+            | Term::Ne(lhs, rhs)
+            | Term::Lt(lhs, rhs)
+            | Term::Le(lhs, rhs)
+            | Term::Gt(lhs, rhs)
+            | Term::Ge(lhs, rhs)
             | Term::Pair(lhs, rhs)
             | Term::Cons(lhs, rhs) => {
                 lhs.substitute(var_map);

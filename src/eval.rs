@@ -215,30 +215,99 @@ impl Expr {
                 Some(val) => Ok(val.clone()),
                 None => bail!("Undefined variable: {:?}", var),
             },
-            Expr::Op(expr, op_kind, expr1) => match op_kind {
-                OpKind::Add => {
-                    let v1 = expr.step(env)?;
-                    let v2 = expr1.step(env)?;
-                    if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
-                        Ok(Value::Int(n1 + n2))
-                    } else {
-                        bail!("Type error in addition")
-                    }
-                }
-                OpKind::Eq => {
-                    let v1 = expr.step(env)?;
-                    let v2 = expr1.step(env)?;
-                    if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
-                        if n1 == n2 {
-                            Ok(Value::Int(1))
+            Expr::Op(expr, op_kind, expr1) => {
+                let v1 = expr.step(env)?;
+                let v2 = expr1.step(env)?;
+                match op_kind {
+                    OpKind::Add => {
+                        if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
+                            Ok(Value::Int(n1 + n2))
                         } else {
-                            Ok(Value::Int(0))
+                            bail!("Type error in addition")
                         }
-                    } else {
-                        bail!("Type error in equality check")
+                    }
+                    OpKind::Eq => {
+                        if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
+                            if n1 == n2 {
+                                Ok(Value::Int(1))
+                            } else {
+                                Ok(Value::Int(0))
+                            }
+                        } else {
+                            bail!("Type error in equality check")
+                        }
+                    }
+                    OpKind::Sub => {
+                        if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
+                            Ok(Value::Int(n1 - n2))
+                        } else {
+                            bail!("Type error in subtraction")
+                        }
+                    }
+                    OpKind::Mul => {
+                        if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
+                            Ok(Value::Int(n1 * n2))
+                        } else {
+                            bail!("Type error in multiplication")
+                        }
+                    }
+                    OpKind::Ne => {
+                        if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
+                            if n1 != n2 {
+                                Ok(Value::Int(1))
+                            } else {
+                                Ok(Value::Int(0))
+                            }
+                        } else {
+                            bail!("Type error in inequality check")
+                        }
+                    }
+                    OpKind::Lt => {
+                        if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
+                            if n1 < n2 {
+                                Ok(Value::Int(1))
+                            } else {
+                                Ok(Value::Int(0))
+                            }
+                        } else {
+                            bail!("Type error in less-than check")
+                        }
+                    }
+                    OpKind::Le => {
+                        if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
+                            if n1 <= n2 {
+                                Ok(Value::Int(1))
+                            } else {
+                                Ok(Value::Int(0))
+                            }
+                        } else {
+                            bail!("Type error in less-than-or-equal check")
+                        }
+                    }
+                    OpKind::Gt => {
+                        if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
+                            if n1 > n2 {
+                                Ok(Value::Int(1))
+                            } else {
+                                Ok(Value::Int(0))
+                            }
+                        } else {
+                            bail!("Type error in greater-than check")
+                        }
+                    }
+                    OpKind::Ge => {
+                        if let (Value::Int(n1), Value::Int(n2)) = (v1, v2) {
+                            if n1 >= n2 {
+                                Ok(Value::Int(1))
+                            } else {
+                                Ok(Value::Int(0))
+                            }
+                        } else {
+                            bail!("Type error in greater-than-or-equal check")
+                        }
                     }
                 }
-            },
+            }
         }
     }
 }

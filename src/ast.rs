@@ -171,5 +171,12 @@ impl Expr {
 #[derive(Debug, Clone)]
 pub enum OpKind {
     Add,
+    Sub,
+    Mul,
     Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }

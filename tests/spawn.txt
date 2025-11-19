@@ -1,0 +1,13 @@
+init = main()
+
+main() = new s1, r in proc1(s1, r)
+proc1(s1: Sender, r: Receiver) = let s2 = dup s1 in proc2(s1, s2, r)
+proc2(s1: Sender, s2: Sender, r: Receiver) = spawn(proc3(s1, s2)); proc4(r)
+proc3(s1: Sender, s2: Sender) = spawn(send_fun(s1, 10)); send_fun(s2, 20)
+proc4(r: Receiver) = let recv1 = recv r in proc5(r, recv1)
+proc5(r: Receiver, recv1: int) = let recv2 = recv r in assert(recv1 + recv2 == 30)
+may_fail_proc5(r: Receiver, recv1: int) = let recv2 = recv r in assert(recv1 == 10)
+assert(cond: int) = if cond then unit() else fail()
+unit() = ()
+fail() = fail
+send_fun(s: Sender, v: int) = send v to s; unit()
