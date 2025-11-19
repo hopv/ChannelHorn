@@ -16,12 +16,23 @@ pub struct Function {
     pub body: Statement,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Int,
     Sender,
     Receiver,
     Func { params: Vec<Type> },
+}
+
+impl Type {
+    pub fn is_linear(&self) -> bool {
+        match self {
+            Type::Int => false,
+            Type::Sender => true,
+            Type::Receiver => true,
+            Type::Func { params: _ } => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +122,14 @@ impl FuncCall {
             arg.substitute_var(var_map);
         }
     }
+
+    pub fn free_vars(&self) -> Vec<VarName> {
+        let mut vars = vec![];
+        for arg in &self.args {
+            vars.extend(arg.free_vars());
+        }
+        vars
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +151,18 @@ impl Expr {
             Expr::Op(lhs, _, rhs) => {
                 lhs.substitute_var(var_map);
                 rhs.substitute_var(var_map);
+            }
+        }
+    }
+
+    pub fn free_vars(&self) -> Vec<VarName> {
+        match self {
+            Expr::Num(_) => vec![],
+            Expr::Var(v) => vec![v.clone()],
+            Expr::Op(lhs, _, rhs) => {
+                let mut vars = lhs.free_vars();
+                vars.extend(rhs.free_vars());
+                vars
             }
         }
     }

@@ -68,6 +68,10 @@ fn main() -> Result<()> {
             args: vec![],
         },
     };
+
+    let chc = program.lower_to_chc()?;
+    println!("Generated CHC:\n{}", chc);
+
     let mut evaluator = channel_rust_impl::eval::Evaluator::new(program);
     loop {
         if let Err(e) = evaluator.step() {
