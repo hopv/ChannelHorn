@@ -6,11 +6,11 @@ use crate::ast::{Expr, FuncCall, Function, OpKind, Program, Statement, Type};
 
 peg::parser! {
     grammar channel_parser() for str {
-        pub rule program() -> (Option<FuncCall>, Vec<Function>)
-            = _ init:init_clause()? funcs:(function_def() ++ _) _ { (init, funcs) }
+        pub rule program() -> (FuncCall, Vec<Function>)
+            = _ init:init_clause() funcs:(function_def() ++ _) _ { (init, funcs) }
 
         rule init_clause() -> FuncCall
-            = kw_init() assign()? call:func_call() { call }
+            = kw_init() assign() call:func_call() { call }
 
         rule function_def() -> Function
             = name:ident() lparen() params:param_list()? rparen() assign() body:statement() {
@@ -274,7 +274,7 @@ peg::parser! {
 }
 
 pub fn parse_program(input: &str) -> Result<Program> {
-    let (init_call, functions) =
+    let (init, functions) =
         channel_parser::program(input).map_err(|e| anyhow!("parse error: {}", e))?;
     let mut map = HashMap::new();
     for func in functions {
@@ -283,19 +283,6 @@ pub fn parse_program(input: &str) -> Result<Program> {
         }
         map.insert(func.name.clone(), func);
     }
-    let init = match init_call {
-        Some(call) => call,
-        None => {
-            if map.contains_key("main") {
-                FuncCall {
-                    name: "main".to_string(),
-                    args: vec![],
-                }
-            } else {
-                bail!("no init clause and no main function found")
-            }
-        }
-    };
     Ok(Program {
         functions: map,
         init,
