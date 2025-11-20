@@ -1,0 +1,13 @@
+init = main()
+
+main() = new s1, r1 in proc1(s1, r1)
+proc1(s1: Sender, r1: Receiver) = new s2, r2 in proc2(s1, s2, r1, r2)
+proc2(s1: Sender, s2: Sender, r1: Receiver, r2: Receiver) = spawn(proc3(s1, r2)); proc4(r1, s2)
+proc3(s1: Sender, r2: Receiver) = let v = recv r2 in send_fun(s1, v + 1)
+proc4(r1: Receiver, s2: Sender) = send 0 to s2; proc5(r1)
+proc5(r1: Receiver) = let v = recv r1 in assert(v == 1)
+
+send_fun(s: Sender, v: int) = send v to s; unit()
+assert(cond: int) = if cond then unit() else fail()
+unit() = ()
+fail() = fail

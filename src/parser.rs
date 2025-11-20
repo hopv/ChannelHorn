@@ -292,7 +292,6 @@ pub fn parse_program(input: &str) -> Result<Program> {
                     args: vec![],
                 }
             } else {
-                // bail!("init節がなく、main関数も存在しません");
                 bail!("no init clause and no main function found")
             }
         }

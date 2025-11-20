@@ -1,0 +1,8 @@
+init = main()
+
+main() = new s, r in proc1(r)
+proc1(r: Receiver) = let v = recv r in assert(v == 42)
+
+assert(cond: int) = if cond then unit() else fail()
+unit() = ()
+fail() = fail
