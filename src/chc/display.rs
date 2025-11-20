@@ -115,10 +115,8 @@ impl fmt::Display for super::Clause {
 }
 
 static PROLOGUE: &str = "\
-; CHC in Z3 fixedpoint (muZ) form
 (set-logic HORN)
 
-; --- Algebraic datatypes: Pair (t:Int, v:Int) and List of Pair ---
 (declare-datatypes ((Pair 0))
   (((mk (key Int) (val Int)))))             ; a pair (t,v)
 
