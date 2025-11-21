@@ -31,16 +31,28 @@ pub enum Value {
 }
 
 impl Evaluator {
-    pub fn new(prog: Program) -> Self {
+    pub fn new(prog: Program) -> Result<Self> {
+        let free_vars = prog.init.free_vars();
+        let mut env = HashMap::new();
+        for var in free_vars {
+            println!("Please provide an integer value for variable {}:", var);
+            let value = {
+                let mut buffer = "".to_string();
+                std::io::stdin().read_line(&mut buffer)?;
+                buffer.trim().parse::<i32>()?
+            };
+            println!("Initializing variable {} with value {}", var, value);
+            env.insert(var, Value::Int(value));
+        }
         let main_thread = Thread {
             statement: Statement::Call(prog.init.clone()),
-            env: HashMap::new(),
+            env,
         };
-        Evaluator {
+        Ok(Evaluator {
             threads: vec![main_thread],
             program: prog,
             fresh_num: Cell::new(0),
-        }
+        })
     }
 
     pub fn is_done(&self) -> bool {

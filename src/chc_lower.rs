@@ -469,6 +469,13 @@ impl ast::Program {
         ctx.type_env = func_type_env;
         ctx.var_declarations.clear();
 
+        let init_free_vars = self.init.free_vars();
+
+        for free_var in init_free_vars {
+            ctx.type_env.insert(free_var.clone(), ast::Type::Int);
+            ctx.var_declarations.insert(free_var, Type::Int);
+        }
+
         let time_var = ctx.insert_declared_var(DEFAULT_TIME_VAR, Type::Int)?;
 
         let init_body = self.init.lower_to_chc(

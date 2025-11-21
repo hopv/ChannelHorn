@@ -23,7 +23,7 @@ fn main() -> Result<()> {
     let ast = parser::parse_program(&input_content)?;
 
     if args.exec {
-        let mut evaluator = channel_rust_impl::eval::Evaluator::new(ast.clone());
+        let mut evaluator = channel_rust_impl::eval::Evaluator::new(ast.clone())?;
         loop {
             if let Err(e) = evaluator.step() {
                 eprintln!("Execution error: {}", e);
