@@ -1,5 +1,5 @@
 init = main()
 
-main() = new s, r in proc1(s)
-proc1(s: Sender) = send 0 to s; unit()
-unit() = ()
+main() = new s, r in proc1(s, r)
+proc1(s: Sender, r: Receiver) = send 0 to s; drop(s, r)
+drop(s: Sender, r: Receiver) = ()

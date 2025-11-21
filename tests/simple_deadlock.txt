@@ -2,8 +2,8 @@ init = main()
 
 main() = new s, r in proc1(s, r)
 proc1(s: Sender, r: Receiver) = let v = recv r in proc2(v, s, r)
-proc2(v: int, s: Sender, r: Receiver) = spawn(drop(s, r)); assert(v == 1)
-
+proc2(v: int, s: Sender, r: Receiver) = send 1 to s; proc3(v, s, r)
+proc3(v: int, s: Sender, r: Receiver) = spawn(drop(s, r)); assert(v == 1)
 assert(cond: int) = if cond then unit() else fail()
 unit() = ()
 fail() = fail
