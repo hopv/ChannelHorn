@@ -1,4 +1,5 @@
 use anyhow::Result;
+use channel_rust_impl::chc;
 use channel_rust_impl::parser;
 use clap::Parser;
 
@@ -7,6 +8,9 @@ use clap::Parser;
 struct Args {
     #[arg(short, long)]
     file: String,
+
+    #[arg(long, default_value_t = false)]
+    no_timestamps: bool,
 
     #[arg(short, long)]
     exec: bool,
@@ -36,7 +40,9 @@ fn main() -> Result<()> {
         }
     }
 
-    let output_chc = ast.lower_to_chc()?;
+    let output_chc = ast.lower_to_chc(chc::Setting {
+        no_timestamps: args.no_timestamps,
+    })?;
 
     if let Some(output_filename) = args.output {
         std::fs::write(output_filename, output_chc.to_string())?;

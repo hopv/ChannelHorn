@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use crate::{
     ast::{self},
     chc::{
-        Body, Clause, Constraint, DisjunctiveBody, PredicateAtom, PredicateName, Term, Type, CHC,
-        MERGE_PREDICATE, SORTED_PREDICATE,
+        Body, Clause, Constraint, DisjunctiveBody, PredicateAtom, PredicateName, Setting, Term,
+        Type, CHC, MERGE_PREDICATE, SORTED_PREDICATE,
     },
 };
 
@@ -15,6 +15,7 @@ pub struct Ctx {
     fun_declarations: HashMap<PredicateName, Vec<Type>>,
     type_env: HashMap<ast::VarName, ast::Type>,
     unused_num: usize,
+    setting: Setting,
 }
 
 impl Ctx {
@@ -145,6 +146,11 @@ impl ast::FuncCall {
         let ast::FuncCall { name, args } = self;
         let error_var = lctx.error_var.clone();
         let time_var = lctx.time_var.clone();
+        let default_args = if ctx.setting.no_timestamps {
+            vec![error_var]
+        } else {
+            vec![error_var, time_var]
+        };
         let args_term = args
             .iter()
             .map(|arg| arg.lower_to_chc(ctx))
@@ -152,10 +158,7 @@ impl ast::FuncCall {
         Ok(Body {
             predicates: vec![PredicateAtom {
                 name: name.clone(),
-                args: vec![error_var, time_var]
-                    .into_iter()
-                    .chain(args_term)
-                    .collect(),
+                args: default_args.into_iter().chain(args_term).collect(),
             }],
             constraints: vec![],
         })
@@ -252,10 +255,14 @@ impl ast::Statement {
                 let receiver_var = ctx.insert_declared_var(receiver, Type::List)?;
                 let body = body.lower_to_chc(ctx, lctx)?;
                 vec![body.concat(Body {
-                    predicates: vec![PredicateAtom {
-                        name: SORTED_PREDICATE.to_string(),
-                        args: vec![sender_var.clone()],
-                    }],
+                    predicates: if ctx.setting.no_timestamps {
+                        vec![]
+                    } else {
+                        vec![PredicateAtom {
+                            name: SORTED_PREDICATE.to_string(),
+                            args: vec![sender_var.clone()],
+                        }]
+                    },
                     constraints: vec![Constraint::Eq(receiver_var, sender_var)],
                 })]
             }
@@ -276,7 +283,11 @@ impl ast::Statement {
                     constraints: vec![Constraint::Eq(
                         sender_var,
                         Term::Cons(
-                            Term::Pair(time_var.into(), value_term.into()).into(),
+                            if ctx.setting.no_timestamps {
+                                value_term.into()
+                            } else {
+                                Term::Pair(time_var.into(), value_term.into()).into()
+                            },
                             new_sender_var.into(),
                         ),
                     )],
@@ -305,6 +316,15 @@ impl ast::Statement {
                 let new_receiver_term = ctx.insert_declared_var(&new_receiver, Type::List)?;
                 body.substitute(&HashMap::from([(receiver.clone(), new_receiver)]));
 
+                let time_constraints = if ctx.setting.no_timestamps {
+                    vec![]
+                } else {
+                    vec![
+                        Constraint::Lt(tmp_time_term.clone(), new_time_term.clone()),
+                        Constraint::Le(lctx.time_var.clone(), new_time_term.clone()),
+                    ]
+                };
+
                 vec![
                     Body {
                         predicates: vec![],
@@ -315,19 +335,22 @@ impl ast::Statement {
                     },
                     Body {
                         predicates: vec![],
-                        constraints: vec![
-                            Constraint::Eq(
-                                receiver_term,
-                                Term::Cons(
-                                    Term::Pair(tmp_time_term.clone().into(), var_term.into())
-                                        .into(),
-                                    new_receiver_term.clone().into(),
-                                ),
+                        constraints: vec![Constraint::Eq(
+                            receiver_term,
+                            Term::Cons(
+                                if ctx.setting.no_timestamps {
+                                    var_term.into()
+                                } else {
+                                    Term::Pair(tmp_time_term.clone().into(), var_term.into()).into()
+                                },
+                                new_receiver_term.clone().into(),
                             ),
-                            Constraint::Lt(tmp_time_term.clone(), new_time_term.clone()),
-                            Constraint::Le(lctx.time_var.clone(), new_time_term.clone()),
-                        ],
+                        )],
                     }
+                    .concat(Body {
+                        predicates: vec![],
+                        constraints: time_constraints,
+                    })
                     .concat(body),
                 ]
             }
@@ -380,7 +403,11 @@ impl ast::Function {
             head: Some(PredicateAtom {
                 name: self.name.clone(),
                 args: [
-                    vec![Term::Bool(false), time_var.clone()],
+                    if ctx.setting.no_timestamps {
+                        vec![Term::Bool(false)]
+                    } else {
+                        vec![Term::Bool(false), time_var.clone()]
+                    },
                     param_terms.clone(),
                 ]
                 .concat(),
@@ -410,7 +437,11 @@ impl ast::Function {
                 head: Some(PredicateAtom {
                     name: self.name.clone(),
                     args: [
-                        vec![error_var.clone(), time_var.clone()],
+                        if ctx.setting.no_timestamps {
+                            vec![error_var.clone()]
+                        } else {
+                            vec![error_var.clone(), time_var.clone()]
+                        },
                         param_terms.clone(),
                     ]
                     .concat(),
@@ -424,10 +455,11 @@ impl ast::Function {
 }
 
 impl ast::Program {
-    pub fn lower_to_chc(&self) -> Result<CHC> {
-        let mut chc = CHC::init_premitive();
+    pub fn lower_to_chc(&self, setting: Setting) -> Result<CHC> {
+        let mut chc = CHC::init_premitive(&setting);
         let mut ctx = Ctx {
             fun_declarations: chc.fun_declarations.clone(),
+            setting,
             ..Default::default()
         };
         let func_type_env: HashMap<ast::VarName, ast::Type> = self
@@ -447,10 +479,11 @@ impl ast::Program {
             ctx.type_env = func_type_env.clone();
             ctx.var_declarations.clear();
             let predicate_args = {
-                let mut params = vec![
-                    Type::Bool, // error var
-                    Type::Int,  // time var
-                ];
+                let mut params = if ctx.setting.no_timestamps {
+                    vec![Type::Bool]
+                } else {
+                    vec![Type::Bool, Type::Int]
+                };
                 params.extend(
                     func.params
                         .iter()
@@ -495,6 +528,7 @@ impl ast::Program {
         Ok(CHC {
             clauses: chc.clauses,
             fun_declarations: ctx.fun_declarations,
+            setting: ctx.setting,
         })
     }
 }

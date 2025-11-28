@@ -141,10 +141,16 @@ impl Body {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone)]
+pub struct Setting {
+    pub no_timestamps: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct CHC {
     pub clauses: Vec<Clause>,
     pub fun_declarations: HashMap<PredicateName, Vec<Type>>,
+    pub setting: Setting,
 }
 
 pub static SORTED_PREDICATE: &str = "%Sorted";
@@ -152,7 +158,7 @@ pub static SORTED_PREDICATE: &str = "%Sorted";
 pub static MERGE_PREDICATE: &str = "%Merge";
 
 impl CHC {
-    pub fn init_premitive() -> Self {
+    pub fn init_premitive(setting: &Setting) -> Self {
         let mut fun_declarations = HashMap::new();
         fun_declarations.insert(SORTED_PREDICATE.to_string(), vec![Type::List]);
         fun_declarations.insert(
@@ -160,74 +166,77 @@ impl CHC {
             vec![Type::List, Type::List, Type::List],
         );
         let mut clauses = vec![];
-        let sorted = vec![
-            Clause {
-                forall: vec![],
-                head: Some(PredicateAtom {
-                    name: SORTED_PREDICATE.to_string(),
-                    args: vec![Term::Nil],
-                }),
-                body: Body {
-                    predicates: vec![],
-                    constraints: vec![],
-                },
-            },
-            Clause {
-                forall: vec![("l".to_string(), Type::List), ("p".to_string(), Type::Pair)],
-                head: Some(PredicateAtom {
-                    name: SORTED_PREDICATE.to_string(),
-                    args: vec![Term::Var("l".to_string())],
-                }),
-                body: Body {
-                    predicates: vec![],
-                    constraints: vec![Constraint::Eq(
-                        Term::Var("l".to_string()),
-                        Term::Cons(Term::Var("p".to_string()).into(), Term::Nil.into()),
-                    )],
-                },
-            },
-            Clause {
-                forall: vec![
-                    ("l".to_string(), Type::List),
-                    ("l2".to_string(), Type::List),
-                    ("l3".to_string(), Type::List),
-                    ("p".to_string(), Type::Pair),
-                    ("p2".to_string(), Type::Pair),
-                ],
-                head: Some(PredicateAtom {
-                    name: SORTED_PREDICATE.to_string(),
-                    args: vec![Term::Var("l".to_string())],
-                }),
-                body: Body {
-                    predicates: vec![PredicateAtom {
-                        name: SORTED_PREDICATE.to_string(),
-                        args: vec![Term::Var("l2".to_string())],
-                    }],
-                    constraints: vec![
-                        Constraint::Eq(
-                            Term::Var("l".to_string()),
-                            Term::Cons(
-                                Term::Var("p".to_string()).into(),
-                                Term::Var("l2".to_string()).into(),
-                            ),
-                        ),
-                        Constraint::Eq(
-                            Term::Var("l2".to_string()),
-                            Term::Cons(
-                                Term::Var("p2".to_string()).into(),
-                                Term::Var("l3".to_string()).into(),
-                            ),
-                        ),
-                        Constraint::Le(
-                            Term::Key(Term::Var("p".to_string()).into()),
-                            Term::Key(Term::Var("p2".to_string()).into()),
-                        ),
-                    ],
-                },
-            },
-        ];
 
-        clauses.extend(sorted);
+        if !setting.no_timestamps {
+            let sorted = vec![
+                Clause {
+                    forall: vec![],
+                    head: Some(PredicateAtom {
+                        name: SORTED_PREDICATE.to_string(),
+                        args: vec![Term::Nil],
+                    }),
+                    body: Body {
+                        predicates: vec![],
+                        constraints: vec![],
+                    },
+                },
+                Clause {
+                    forall: vec![("l".to_string(), Type::List), ("p".to_string(), Type::Pair)],
+                    head: Some(PredicateAtom {
+                        name: SORTED_PREDICATE.to_string(),
+                        args: vec![Term::Var("l".to_string())],
+                    }),
+                    body: Body {
+                        predicates: vec![],
+                        constraints: vec![Constraint::Eq(
+                            Term::Var("l".to_string()),
+                            Term::Cons(Term::Var("p".to_string()).into(), Term::Nil.into()),
+                        )],
+                    },
+                },
+                Clause {
+                    forall: vec![
+                        ("l".to_string(), Type::List),
+                        ("l2".to_string(), Type::List),
+                        ("l3".to_string(), Type::List),
+                        ("p".to_string(), Type::Pair),
+                        ("p2".to_string(), Type::Pair),
+                    ],
+                    head: Some(PredicateAtom {
+                        name: SORTED_PREDICATE.to_string(),
+                        args: vec![Term::Var("l".to_string())],
+                    }),
+                    body: Body {
+                        predicates: vec![PredicateAtom {
+                            name: SORTED_PREDICATE.to_string(),
+                            args: vec![Term::Var("l2".to_string())],
+                        }],
+                        constraints: vec![
+                            Constraint::Eq(
+                                Term::Var("l".to_string()),
+                                Term::Cons(
+                                    Term::Var("p".to_string()).into(),
+                                    Term::Var("l2".to_string()).into(),
+                                ),
+                            ),
+                            Constraint::Eq(
+                                Term::Var("l2".to_string()),
+                                Term::Cons(
+                                    Term::Var("p2".to_string()).into(),
+                                    Term::Var("l3".to_string()).into(),
+                                ),
+                            ),
+                            Constraint::Le(
+                                Term::Key(Term::Var("p".to_string()).into()),
+                                Term::Key(Term::Var("p2".to_string()).into()),
+                            ),
+                        ],
+                    },
+                },
+            ];
+
+            clauses.extend(sorted);
+        }
 
         // Merge predicate
         let merge = vec![
@@ -262,7 +271,14 @@ impl CHC {
                     ("l3".to_string(), Type::List),
                     ("l1tail".to_string(), Type::List),
                     ("l3tail".to_string(), Type::List),
-                    ("p".to_string(), Type::Pair),
+                    (
+                        "p".to_string(),
+                        if setting.no_timestamps {
+                            Type::Int
+                        } else {
+                            Type::Pair
+                        },
+                    ),
                 ],
                 head: Some(PredicateAtom {
                     name: MERGE_PREDICATE.to_string(),
@@ -306,7 +322,14 @@ impl CHC {
                     ("l3".to_string(), Type::List),
                     ("l2tail".to_string(), Type::List),
                     ("l3tail".to_string(), Type::List),
-                    ("p".to_string(), Type::Pair),
+                    (
+                        "p".to_string(),
+                        if setting.no_timestamps {
+                            Type::Int
+                        } else {
+                            Type::Pair
+                        },
+                    ),
                 ],
                 head: Some(PredicateAtom {
                     name: MERGE_PREDICATE.to_string(),
@@ -350,6 +373,7 @@ impl CHC {
         CHC {
             clauses,
             fun_declarations,
+            setting: Setting::default(),
         }
     }
 }

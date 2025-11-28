@@ -52,7 +52,7 @@ impl fmt::Display for super::Type {
         match self {
             super::Type::Int => write!(f, "Int"),
             super::Type::Bool => write!(f, "Bool"),
-            super::Type::List => write!(f, "List"),
+            super::Type::List => write!(f, "Lst"),
             super::Type::Pair => write!(f, "Pair"),
             super::Type::Func { args } => {
                 let args_str: Vec<String> = args.iter().map(|arg| format!("{}", arg)).collect();
@@ -120,14 +120,24 @@ static PROLOGUE: &str = "\
 (declare-datatypes ((Pair 0))
   (((mk (key Int) (val Int)))))             ; a pair (t,v)
 
-(declare-datatypes ((List 0))
-  (((nil) (cons (head Pair) (tail List))))) ; [] | (p :: rest)";
+(declare-datatypes ((Lst 0))
+  (((nil) (cons (head Pair) (tail Lst))))) ; [] | (p :: rest)";
+
+static NO_TIMESTAMPS_PROLOGUE: &str = "\
+(set-logic HORN)
+
+(declare-datatypes ((Lst 0))
+  (((nil) (cons (head Int) (tail Lst))))) ; [] | (n :: rest)";
 
 static EPILOGUE: &str = "(check-sat)";
 
 impl fmt::Display for super::CHC {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}\n\n", PROLOGUE)?;
+        if self.setting.no_timestamps {
+            write!(f, "{}\n\n", NO_TIMESTAMPS_PROLOGUE)?;
+        } else {
+            write!(f, "{}\n\n", PROLOGUE)?;
+        }
         let fun_declarations_str: Vec<String> = self
             .fun_declarations
             .iter()
