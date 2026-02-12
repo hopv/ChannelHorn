@@ -52,8 +52,8 @@ impl fmt::Display for super::Type {
         match self {
             super::Type::Int => write!(f, "Int"),
             super::Type::Bool => write!(f, "Bool"),
-            super::Type::List => write!(f, "Lst"),
-            super::Type::Pair => write!(f, "Pair"),
+            super::Type::Prophecy => write!(f, "Lst"),
+            super::Type::TimestampedValue => write!(f, "Pair"),
             super::Type::Func { args } => {
                 let args_str: Vec<String> = args.iter().map(|arg| format!("{}", arg)).collect();
                 write!(f, "({}) Bool", args_str.join(" "))

@@ -101,8 +101,8 @@ impl Constraint {
 pub enum Type {
     Int,
     Bool,
-    List,
-    Pair,
+    Prophecy,
+    TimestampedValue,
     Func { args: Vec<Type> },
 }
 
@@ -160,10 +160,10 @@ pub static MERGE_PREDICATE: &str = "%Merge";
 impl CHC {
     pub fn init_premitive(setting: &Setting) -> Self {
         let mut fun_declarations = HashMap::new();
-        fun_declarations.insert(SORTED_PREDICATE.to_string(), vec![Type::List]);
+        fun_declarations.insert(SORTED_PREDICATE.to_string(), vec![Type::Prophecy]);
         fun_declarations.insert(
             MERGE_PREDICATE.to_string(),
-            vec![Type::List, Type::List, Type::List],
+            vec![Type::Prophecy, Type::Prophecy, Type::Prophecy],
         );
         let mut clauses = vec![];
 
@@ -181,7 +181,10 @@ impl CHC {
                     },
                 },
                 Clause {
-                    forall: vec![("l".to_string(), Type::List), ("p".to_string(), Type::Pair)],
+                    forall: vec![
+                        ("l".to_string(), Type::Prophecy),
+                        ("p".to_string(), Type::TimestampedValue),
+                    ],
                     head: Some(PredicateAtom {
                         name: SORTED_PREDICATE.to_string(),
                         args: vec![Term::Var("l".to_string())],
@@ -196,11 +199,11 @@ impl CHC {
                 },
                 Clause {
                     forall: vec![
-                        ("l".to_string(), Type::List),
-                        ("l2".to_string(), Type::List),
-                        ("l3".to_string(), Type::List),
-                        ("p".to_string(), Type::Pair),
-                        ("p2".to_string(), Type::Pair),
+                        ("l".to_string(), Type::Prophecy),
+                        ("l2".to_string(), Type::Prophecy),
+                        ("l3".to_string(), Type::Prophecy),
+                        ("p".to_string(), Type::TimestampedValue),
+                        ("p2".to_string(), Type::TimestampedValue),
                     ],
                     head: Some(PredicateAtom {
                         name: SORTED_PREDICATE.to_string(),
@@ -241,7 +244,7 @@ impl CHC {
         // Merge predicate
         let merge = vec![
             Clause {
-                forall: vec![("l".to_string(), Type::List)],
+                forall: vec![("l".to_string(), Type::Prophecy)],
                 head: Some(PredicateAtom {
                     name: MERGE_PREDICATE.to_string(),
                     args: vec![
@@ -253,7 +256,7 @@ impl CHC {
                 body: Body::default(),
             },
             Clause {
-                forall: vec![("l".to_string(), Type::List)],
+                forall: vec![("l".to_string(), Type::Prophecy)],
                 head: Some(PredicateAtom {
                     name: MERGE_PREDICATE.to_string(),
                     args: vec![
@@ -266,17 +269,17 @@ impl CHC {
             },
             Clause {
                 forall: vec![
-                    ("l1".to_string(), Type::List),
-                    ("l2".to_string(), Type::List),
-                    ("l3".to_string(), Type::List),
-                    ("l1tail".to_string(), Type::List),
-                    ("l3tail".to_string(), Type::List),
+                    ("l1".to_string(), Type::Prophecy),
+                    ("l2".to_string(), Type::Prophecy),
+                    ("l3".to_string(), Type::Prophecy),
+                    ("l1tail".to_string(), Type::Prophecy),
+                    ("l3tail".to_string(), Type::Prophecy),
                     (
                         "p".to_string(),
                         if setting.no_timestamps {
                             Type::Int
                         } else {
-                            Type::Pair
+                            Type::TimestampedValue
                         },
                     ),
                 ],
@@ -317,17 +320,17 @@ impl CHC {
             },
             Clause {
                 forall: vec![
-                    ("l1".to_string(), Type::List),
-                    ("l2".to_string(), Type::List),
-                    ("l3".to_string(), Type::List),
-                    ("l2tail".to_string(), Type::List),
-                    ("l3tail".to_string(), Type::List),
+                    ("l1".to_string(), Type::Prophecy),
+                    ("l2".to_string(), Type::Prophecy),
+                    ("l3".to_string(), Type::Prophecy),
+                    ("l2tail".to_string(), Type::Prophecy),
+                    ("l3tail".to_string(), Type::Prophecy),
                     (
                         "p".to_string(),
                         if setting.no_timestamps {
                             Type::Int
                         } else {
-                            Type::Pair
+                            Type::TimestampedValue
                         },
                     ),
                 ],
