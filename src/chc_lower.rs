@@ -273,24 +273,34 @@ impl ast::Statement {
             } => {
                 let time_var = lctx.time_var.clone();
                 let sender_var = ctx.insert_declared_var(sender, Type::Prophecy)?;
+                let new_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
+                let new_time_term = ctx.insert_declared_var(&new_time_var, Type::Int)?;
                 let value_term = value.lower_to_chc(ctx)?;
-                let mut body = body.lower_to_chc(ctx, lctx)?;
+                let new_lctx = LocalCtx {
+                    error_var: lctx.error_var.clone(),
+                    time_var: new_time_term.clone(),
+                };
+                let mut body = body.lower_to_chc(ctx, &new_lctx)?;
                 let new_sender = ctx.gen_new_var(sender);
                 let new_sender_var = ctx.insert_declared_var(&new_sender, Type::Prophecy)?;
                 body.substitute(&HashMap::from([(sender.clone(), new_sender)]));
                 vec![body.concat(Body {
                     predicates: vec![],
-                    constraints: vec![Constraint::Eq(
-                        sender_var,
-                        Term::Cons(
-                            if ctx.setting.no_timestamps {
-                                value_term.into()
-                            } else {
-                                Term::Pair(time_var.into(), value_term.into()).into()
-                            },
-                            new_sender_var.into(),
+                    constraints: vec![
+                        Constraint::Eq(
+                            sender_var,
+                            Term::Cons(
+                                if ctx.setting.no_timestamps {
+                                    value_term.into()
+                                } else {
+                                    Term::Pair(new_time_term.clone().into(), value_term.into())
+                                        .into()
+                                },
+                                new_sender_var.into(),
+                            ),
                         ),
-                    )],
+                        Constraint::Le(time_var, new_time_term),
+                    ],
                 })]
             }
             ast::Statement::Recv {
@@ -325,13 +335,26 @@ impl ast::Statement {
                     ]
                 };
 
+                let out_channels = ctx.collect_out_channels();
+                let out_channels_constraints = out_channels
+                    .into_iter()
+                    .map(|chan| {
+                        let chan_var = ctx.insert_declared_var(chan, Type::Prophecy)?;
+                        Ok(Constraint::Eq(chan_var, Term::Nil))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
                 vec![
                     Body {
                         predicates: vec![],
-                        constraints: vec![
-                            Constraint::Eq(receiver_term.clone(), Term::Nil),
-                            Constraint::Eq(lctx.error_var.clone(), Term::Bool(false)),
-                        ],
+                        constraints: [
+                            vec![
+                                Constraint::Eq(receiver_term.clone(), Term::Nil),
+                                Constraint::Eq(lctx.error_var.clone(), Term::Bool(false)),
+                            ],
+                            out_channels_constraints,
+                        ]
+                        .concat(),
                     },
                     Body {
                         predicates: vec![],
