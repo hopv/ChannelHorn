@@ -2,11 +2,11 @@ use anyhow::Result;
 use std::collections::HashMap;
 
 use crate::{
-    ast::{self},
     chc::{
-        Body, Clause, Constraint, DisjunctiveBody, PredicateAtom, PredicateName, Setting, Term,
-        Type, CHC, MERGE_PREDICATE, SORTED_PREDICATE,
+        Body, CHC, Clause, Constraint, DisjunctiveBody, MERGE_PREDICATE, PredicateAtom,
+        PredicateName, SORTED_PREDICATE, Setting, Term, Type,
     },
+    core::ast::{self},
 };
 
 #[derive(Debug, Default)]
@@ -239,14 +239,16 @@ impl ast::Statement {
 
                 ctx.type_env.extend(tmp_type_env);
 
-                vec![Body {
-                    predicates: vec![],
-                    constraints: vec![Constraint::Eq(
-                        lctx.error_var.clone(),
-                        Term::LOr(Box::new(first_error_term), Box::new(second_error_term)),
-                    )],
-                }
-                .concat(func_call_body.concat(func_call1_body))]
+                vec![
+                    Body {
+                        predicates: vec![],
+                        constraints: vec![Constraint::Eq(
+                            lctx.error_var.clone(),
+                            Term::LOr(Box::new(first_error_term), Box::new(second_error_term)),
+                        )],
+                    }
+                    .concat(func_call_body.concat(func_call1_body)),
+                ]
             }
             ast::Statement::New {
                 sender,
@@ -339,25 +341,27 @@ impl ast::Statement {
                     ]
                 };
 
-                vec![Body {
-                    predicates: vec![],
-                    constraints: vec![Constraint::Eq(
-                        receiver_term,
-                        Term::Cons(
-                            if ctx.setting.no_timestamps {
-                                var_term.into()
-                            } else {
-                                Term::Pair(tmp_time_term.clone().into(), var_term.into()).into()
-                            },
-                            new_receiver_term.clone().into(),
-                        ),
-                    )],
-                }
-                .concat(Body {
-                    predicates: vec![],
-                    constraints: time_constraints,
-                })
-                .concat(body)]
+                vec![
+                    Body {
+                        predicates: vec![],
+                        constraints: vec![Constraint::Eq(
+                            receiver_term,
+                            Term::Cons(
+                                if ctx.setting.no_timestamps {
+                                    var_term.into()
+                                } else {
+                                    Term::Pair(tmp_time_term.clone().into(), var_term.into()).into()
+                                },
+                                new_receiver_term.clone().into(),
+                            ),
+                        )],
+                    }
+                    .concat(Body {
+                        predicates: vec![],
+                        constraints: time_constraints,
+                    })
+                    .concat(body),
+                ]
             }
             ast::Statement::Dup { sender, var, body } => {
                 let sender_term = ctx.insert_declared_var(sender, Type::Prophecy)?;
@@ -367,14 +371,16 @@ impl ast::Statement {
                 ctx.type_env.insert(var.clone(), ast::Type::Sender);
                 let mut body = body.lower_to_chc(ctx, lctx)?;
                 body.substitute(&HashMap::from([(sender.clone(), new_sender_var)]));
-                vec![Body {
-                    predicates: vec![PredicateAtom {
-                        name: MERGE_PREDICATE.to_string(),
-                        args: vec![var_term, new_sender_term, sender_term],
-                    }],
-                    constraints: vec![],
-                }
-                .concat(body)]
+                vec![
+                    Body {
+                        predicates: vec![PredicateAtom {
+                            name: MERGE_PREDICATE.to_string(),
+                            args: vec![var_term, new_sender_term, sender_term],
+                        }],
+                        constraints: vec![],
+                    }
+                    .concat(body),
+                ]
             }
         })
     }

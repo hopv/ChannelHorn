@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::ast::VarName;
+use crate::core::ast::VarName;
 
 pub mod display;
 

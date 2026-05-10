@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use rand;
 use std::{
     cell::{Cell, RefCell},
@@ -6,7 +6,7 @@ use std::{
     rc::Rc,
 };
 
-use crate::ast::{Expr, FuncCall, OpKind, Program, Statement, VarName};
+use super::ast::{Expr, FuncCall, OpKind, Program, Statement, VarName};
 
 #[derive(Debug)]
 pub struct Evaluator {

@@ -1,5 +1,5 @@
-pub mod ast;
 pub mod chc;
-pub mod chc_lower;
-pub mod eval;
-pub mod parser;
+pub mod core;
+pub mod sugar;
+
+pub use core::{ast, chc_lower, eval, parser};

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
-use crate::ast::{Expr, FuncCall, Function, OpKind, Program, Statement, Type};
+use super::ast::{Expr, FuncCall, Function, OpKind, Program, Statement, Type};
 
 peg::parser! {
     grammar channel_parser() for str {
