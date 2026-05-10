@@ -168,7 +168,11 @@ impl ast::FuncCall {
 impl ast::Statement {
     fn lower_to_chc(&self, ctx: &mut Ctx, lctx: &LocalCtx) -> Result<DisjunctiveBody> {
         Ok(match self {
-            ast::Statement::Fail | ast::Statement::Unit => {
+            ast::Statement::Unit => {
+                vec![]
+            }
+
+            ast::Statement::Fail => {
                 let mut constraints = vec![];
                 let error_var = lctx.error_var.clone();
                 constraints.push(Constraint::Eq(
@@ -335,47 +339,25 @@ impl ast::Statement {
                     ]
                 };
 
-                let out_channels = ctx.collect_out_channels();
-                let out_channels_constraints = out_channels
-                    .into_iter()
-                    .map(|chan| {
-                        let chan_var = ctx.insert_declared_var(chan, Type::Prophecy)?;
-                        Ok(Constraint::Eq(chan_var, Term::Nil))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-
-                vec![
-                    Body {
-                        predicates: vec![],
-                        constraints: [
-                            vec![
-                                Constraint::Eq(receiver_term.clone(), Term::Nil),
-                                Constraint::Eq(lctx.error_var.clone(), Term::Bool(false)),
-                            ],
-                            out_channels_constraints,
-                        ]
-                        .concat(),
-                    },
-                    Body {
-                        predicates: vec![],
-                        constraints: vec![Constraint::Eq(
-                            receiver_term,
-                            Term::Cons(
-                                if ctx.setting.no_timestamps {
-                                    var_term.into()
-                                } else {
-                                    Term::Pair(tmp_time_term.clone().into(), var_term.into()).into()
-                                },
-                                new_receiver_term.clone().into(),
-                            ),
-                        )],
-                    }
-                    .concat(Body {
-                        predicates: vec![],
-                        constraints: time_constraints,
-                    })
-                    .concat(body),
-                ]
+                vec![Body {
+                    predicates: vec![],
+                    constraints: vec![Constraint::Eq(
+                        receiver_term,
+                        Term::Cons(
+                            if ctx.setting.no_timestamps {
+                                var_term.into()
+                            } else {
+                                Term::Pair(tmp_time_term.clone().into(), var_term.into()).into()
+                            },
+                            new_receiver_term.clone().into(),
+                        ),
+                    )],
+                }
+                .concat(Body {
+                    predicates: vec![],
+                    constraints: time_constraints,
+                })
+                .concat(body)]
             }
             ast::Statement::Dup { sender, var, body } => {
                 let sender_term = ctx.insert_declared_var(sender, Type::Prophecy)?;
