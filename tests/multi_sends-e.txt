@@ -1,0 +1,17 @@
+init = main(n)
+
+main(n: int) = if n >= 0 then proc0(n) else unit()
+proc0(n: int) = new s1, r in proc1(s1, r, n)
+proc1(s1: Sender, r: Receiver, n: int) = spawn(proc2(s1, 1, n)); proc3(r, 0, 1, n)
+proc2(s1: Sender, count: int, limit: int) = if count < limit then proc2_1(s1, count, limit) else drop_s(s1)
+proc2_1(s1: Sender, count: int, limit: int) = send 1 to s1; proc2(s1, count + 1, limit)
+proc3(r: Receiver, sum: int, count: int, limit: int) = if count < limit then proc4(r, sum, count, limit) else proc5(r, sum, limit)
+proc4(r: Receiver, sum: int, count: int, limit: int) = let v = recv r in proc3(r, sum + v, count + 1, limit)
+proc5(r: Receiver, sum: int, limit: int) = spawn(drop_r(r)); assert(sum == limit)
+
+assert(cond: int) = if cond then unit() else fail()
+unit() = ()
+fail() = fail
+
+drop_s(s: Sender) = ()
+drop_r(r: Receiver) = ()

@@ -1,0 +1,21 @@
+init = main(n)
+
+main(n: int) = if n >= 0 then msg_count(n) else unit()
+msg_count(n: int) = new s, r in for(0, n, s, r)
+for(i: int, n: int, s: Sender, r: Receiver) = if i < n then f1(i, n, s, r) else g1(n, s, r)
+
+f1(i: int, n: int, s: Sender, r: Receiver) = let s_dup = dup s in f2(i, n, s, s_dup, r)
+f2(i: int, n: int, s: Sender, s_dup: Sender, r: Receiver) = spawn(send_fun(s_dup, 1)); for(i + 1, n, s, r)
+
+g1(n: int, s: Sender, r: Receiver) = spawn(drop_s(s)); loop(0, n, r)
+loop(i: int, n: int, r: Receiver) = let v = recv r in assert(i+1, n, r)
+assert(i: int, n: int, r: Receiver) = if i <= n then loop(i, n, r) else fail()
+
+unit() = ()
+fail() = fail
+
+send_fun(s: Sender, v: int) = send v to s; drop_s(s)
+
+drop_s(s: Sender) = ()
+drop_r(r: Receiver) = ()
+

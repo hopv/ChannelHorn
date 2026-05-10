@@ -1,0 +1,22 @@
+init = main()
+
+main() = new s, r in f1(s, r)
+f1(s: Sender, r: Receiver) = new p, q in f2(s, r, p, q)
+f2(s: Sender, r: Receiver, p: Sender, q: Receiver) = spawn(server(s, q)); client(r, p, 0)
+server(s: Sender, q: Receiver) = let x = recv q in server_inner1(s, q, x)
+server_inner1(s: Sender, q: Receiver, x: int) = let s_dup = dup s in server_inner2(s, s_dup, q, x)
+server_inner2(s: Sender, s_dup: Sender, q: Receiver, x: int) = spawn(send_fun(s_dup, x + 1)); drop(s, q)
+client(r: Receiver, p: Sender, x: int) = let p_dup = dup p in client_inner1(r, p, p_dup, x)
+client_inner1(r: Receiver, p: Sender, p_dup: Sender, x: int) = spawn(send_fun(p_dup, x)); client_inner2(r, p, x)
+client_inner2(r: Receiver, p: Sender, x: int) = let y = recv r in client_inner3(r, p, x, y)
+client_inner3(r: Receiver, p: Sender, x: int, y: int) = spawn(assert(y == x + 1)); drop(p, r)
+
+assert(cond: int) = if cond then unit() else fail()
+unit() = ()
+fail() = fail
+
+drop(s: Sender, r: Receiver) = ()
+drop_s(s: Sender) = ()
+drop_r(r: Receiver) = ()
+
+send_fun(s: Sender, val: int) = send val to s; drop_s(s)

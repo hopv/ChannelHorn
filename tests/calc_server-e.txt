@@ -1,0 +1,28 @@
+init = main(cmd, x, y)
+
+main(cmd: int, x: int, y: int) = new cmd_s, cmd_r in f1(cmd, x, y, cmd_s, cmd_r)
+f1(cmd: int, x: int, y: int, cmd_s: Sender, cmd_r: Receiver) = new result_s, result_r in f2(cmd, x, y, cmd_s, cmd_r, result_s, result_r)
+f2(cmd: int, x: int, y: int, cmd_s: Sender, cmd_r: Receiver, result_s: Sender, result_r: Receiver) = spawn(server(cmd_r, result_s)); f3(cmd, x, y, cmd_s, result_r)
+f3(cmd: int, x: int, y: int, cmd_s: Sender, result_r: Receiver) = send cmd to cmd_s; f4(cmd, x, y, cmd_s, result_r)
+f4(cmd: int, x: int, y: int, cmd_s: Sender, result_r: Receiver) = send x to cmd_s; f5(cmd, x, y, cmd_s, result_r)
+f5(cmd: int, x: int, y: int, cmd_s: Sender, result_r: Receiver) = send y to cmd_s; f6(cmd, x, y, cmd_s, result_r)
+f6(cmd: int, x: int, y: int, cmd_s: Sender, result_r: Receiver) = let result = recv result_r in f7(cmd, x, y, cmd_s, result_r, result)
+f7(cmd: int, x: int, y: int, cmd_s: Sender, result_r: Receiver, result: int) = spawn(drop(cmd_s, result_r)); f8(cmd, x, y, result)
+f8(cmd: int, x: int, y: int, result: int) = if cmd == 0 then assert(result == x + y) else f9(cmd, x, y, result)
+f9(cmd: int, x: int, y: int, result: int) = if cmd == 1 then assert(result == x - y) else f10(result)
+f10(result: int) = assert(result == 0)
+
+server(cmd_r: Receiver, result_s: Sender) = let cmd = recv cmd_r in g1(cmd_r, result_s, cmd)
+g1(cmd_r: Receiver, result_s: Sender, cmd: int) = let x = recv cmd_r in g2(cmd_r, result_s, cmd, x)
+g2(cmd_r: Receiver, result_s: Sender, cmd: int, x: int) = let y = recv cmd_r in g3(cmd_r, result_s, cmd, x, y)
+g3(cmd_r: Receiver, result_s: Sender, cmd: int, x: int, y: int) = if cmd == 0 then g4(cmd_r, result_s, x - y) else g5(cmd_r, result_s, cmd, x, y)
+g4(cmd_r: Receiver, result_s: Sender, sum: int) = send sum to result_s; server(cmd_r, result_s)
+g5(cmd_r: Receiver, result_s: Sender, cmd: int, x: int, y: int) = if cmd == 1 then g6(cmd_r, result_s, x + y) else g7(cmd_r, result_s)
+g6(cmd_r: Receiver, result_s: Sender, product: int) = send product to result_s; server(cmd_r, result_s)
+g7(cmd_r: Receiver, result_s: Sender) = send 0 to result_s; server(cmd_r, result_s)
+
+drop(cmd_s: Sender, result_r: Receiver) = ()
+
+assert(cond: int) = if cond then unit() else fail()
+unit() = ()
+fail() = fail

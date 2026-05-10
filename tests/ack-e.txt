@@ -1,0 +1,21 @@
+init = main()
+
+main() = new s1, r in proc1(s1, r)
+proc1(s1: Sender, r: Receiver) = new ack_s, ack_r in proc2(s1, r, ack_s, ack_r)
+proc2(s1: Sender, r: Receiver, ack_s: Sender, ack_r: Receiver) = let s2 = dup s1 in proc3(s1, s2, r, ack_s, ack_r)
+proc3(s1: Sender, s2: Sender, r: Receiver, ack_s: Sender, ack_r: Receiver) = spawn(proc4(s1, s2, ack_r)); proc5(r, ack_s)
+proc4(s1: Sender, s2: Sender, ack_r: Receiver) = spawn(proc4_1(s1)); proc4_2(s2, ack_r)
+proc4_1(s1: Sender) = send 20 to s1; drop_s(s1)
+proc4_2(s2: Sender, ack_r: Receiver) = let x = recv ack_r in proc4_3(s2, ack_r)
+proc4_3(s2: Sender, ack_r: Receiver) = send 10 to s2; drop(s2, ack_r)
+proc5(r: Receiver, ack_s: Sender) = let v1 = recv r in proc6(r, ack_s, v1)
+proc6(r: Receiver, ack_s: Sender, v1: int) = send 1 to ack_s; proc7(r, ack_s, v1)
+proc7(r: Receiver, ack_s: Sender, v1: int) = let v2 = recv r in proc8(v1, v2, ack_s, r)
+proc8(v1: int, v2: int, ack_s: Sender, r: Receiver) = spawn(drop(ack_s, r)); assert((v1 == 10) + (v2 == 20) == 2)
+
+assert(cond: int) = if cond then unit() else fail()
+unit() = ()
+fail() = fail
+
+drop(s: Sender, r: Receiver) = ()
+drop_s(s: Sender) = ()

@@ -5,7 +5,7 @@ proc1(s1: Sender, r: Receiver) = let s2 = dup s1 in proc2(s1, s2, r)
 proc2(s1: Sender, s2: Sender, r: Receiver) = spawn(proc3(s1, s2)); proc4(r)
 proc3(s1: Sender, s2: Sender) = spawn(send_fun(s1, 10)); send_fun(s2, 20)
 proc4(r: Receiver) = let recv1 = recv r in proc5(r, recv1)
-proc5(r: Receiver, recv1: int) = let recv2 = recv r in proc6(r, recv1, recv2)
+proc5(r: Receiver, recv1: int) = let recv2 = recv r in may_fail_proc6(r, recv1, recv2)
 proc6(r: Receiver, recv1: int, recv2: int) = spawn(drop_r(r)); assert(recv1 + recv2 == 30)
 may_fail_proc6(r: Receiver, recv1: int, recv2: int) = spawn(drop_r(r)); assert(recv1 == 10)
 
