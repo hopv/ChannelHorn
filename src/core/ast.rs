@@ -3,13 +3,13 @@ use std::collections::HashMap;
 pub type FuncName = String;
 pub type VarName = String;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
     pub functions: HashMap<FuncName, Function>,
     pub init: FuncCall,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function {
     pub name: FuncName,
     pub params: Vec<(VarName, Type)>,
@@ -35,7 +35,7 @@ impl Type {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
     Fail,
     Unit,
@@ -110,7 +110,7 @@ impl Statement {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuncCall {
     pub name: FuncName,
     pub args: Vec<Expr>,
@@ -132,7 +132,7 @@ impl FuncCall {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     Num(i32),
     Var(VarName),
@@ -168,7 +168,7 @@ impl Expr {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpKind {
     Add,
     Sub,

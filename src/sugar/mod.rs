@@ -1,1 +1,4 @@
-// 構文糖衣言語の AST / parser / desugar / typecheck をここに追加する。
+pub mod ast;
+pub mod check;
+pub mod desugar;
+pub mod parser;

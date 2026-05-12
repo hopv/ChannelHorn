@@ -1,6 +1,7 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use channel_rust_impl::chc;
 use channel_rust_impl::core::{eval, parser};
+use channel_rust_impl::sugar;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
@@ -17,6 +18,9 @@ struct Args {
 
     #[arg(short, long)]
     output: Option<String>,
+
+    #[arg(short, long, default_value_t = false)]
+    sugar: bool,
 }
 
 fn main() -> Result<()> {
@@ -24,7 +28,17 @@ fn main() -> Result<()> {
     let filename = args.file;
 
     let input_content = std::fs::read_to_string(&filename)?;
-    let ast = parser::parse_program(&input_content)?;
+    let ast = if args.sugar {
+        let sugar_ast = sugar::parser::parse_program(&input_content)?;
+        sugar::check::check_program(&sugar_ast)
+            .map_err(|e| anyhow!("sugar check error: {:?}", e))?;
+        sugar::desugar::desugar_program(&sugar_ast)?
+    } else {
+        parser::parse_program(&input_content)?
+    };
+    if args.sugar {
+        println!("{}", ast);
+    }
 
     if args.exec {
         let mut evaluator = eval::Evaluator::new(ast.clone())?;
