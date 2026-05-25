@@ -318,19 +318,12 @@ fn desugar_stmt(
             then_block,
             else_block,
         } => {
-            let then_call = emit_statements_call(
-                ctx,
-                statements_after_block(then_block, statements, index),
-                env.clone(),
-            )?;
+            let join_call = continuation_after_if(ctx, statements, index, env.clone(), liveness)?;
+            let then_call = emit_branch_call(ctx, then_block, join_call.as_ref(), env.clone())?;
             let else_call = if let Some(else_block) = else_block {
-                emit_statements_call(
-                    ctx,
-                    statements_after_block(else_block, statements, index),
-                    env,
-                )?
+                emit_branch_call(ctx, else_block, join_call.as_ref(), env)?
             } else {
-                continuation_call(ctx, statements, index, env, liveness, &[])?
+                join_call.unwrap_or_else(|| terminal_unit_call(ctx, &env))
             };
             Ok(core::Statement::If(lower_expr(cond)?, then_call, else_call))
         }
@@ -374,10 +367,52 @@ fn desugar_stmt(
     }
 }
 
-fn statements_after_block(block: &ast::Block, statements: &[Stmt], index: usize) -> Vec<Stmt> {
-    let mut branch = block.statements.clone();
-    branch.extend_from_slice(&statements[index + 1..]);
-    branch
+fn continuation_after_if(
+    ctx: &mut Ctx,
+    statements: &[Stmt],
+    index: usize,
+    env: Env,
+    liveness: &Liveness,
+) -> Result<Option<core::FuncCall>> {
+    if index + 1 == statements.len() {
+        return Ok(None);
+    }
+
+    Ok(Some(continuation_call(
+        ctx,
+        statements,
+        index,
+        env,
+        liveness,
+        &[],
+    )?))
+}
+
+fn emit_branch_call(
+    ctx: &mut Ctx,
+    block: &ast::Block,
+    join_call: Option<&core::FuncCall>,
+    env: Env,
+) -> Result<core::FuncCall> {
+    let mut statements = block.statements.clone();
+    if let Some(join_call) = join_call {
+        statements.push(join_statement(join_call)?);
+    }
+    emit_statements_call(ctx, statements, env)
+}
+
+fn join_statement(call: &core::FuncCall) -> Result<Stmt> {
+    Ok(Stmt::Call {
+        name: call.name.clone(),
+        args: call.args.iter().map(join_arg).collect::<Result<Vec<_>>>()?,
+    })
+}
+
+fn join_arg(expr: &core::Expr) -> Result<Expr> {
+    match expr {
+        core::Expr::Var(var) => Ok(Expr::Var(var.clone())),
+        _ => bail!("if join arguments must be variables"),
+    }
 }
 
 fn emit_statements_call(ctx: &mut Ctx, statements: Vec<Stmt>, env: Env) -> Result<core::FuncCall> {
@@ -1104,6 +1139,52 @@ mod tests {
 
         let else_function = generated_function(&ctx, &else_call.name);
         assert!(matches!(else_function.body, core::Statement::If(_, _, _)));
+    }
+
+    #[test]
+    fn if_statement_shares_continuation_after_branches() {
+        let (stmt, ctx) = convert_first_stmt(
+            vec![
+                Stmt::If {
+                    cond: var("x"),
+                    then_block: ast::Block { statements: vec![] },
+                    else_block: Some(ast::Block { statements: vec![] }),
+                },
+                Stmt::Assert(var("y")),
+            ],
+            env(&[("x", core::Type::Int), ("y", core::Type::Int)]),
+        );
+
+        let (then_call, else_call) = match stmt {
+            core::Statement::If(cond, then_call, else_call) => {
+                assert_eq!(cond, core_var("x"));
+                (then_call, else_call)
+            }
+            other => panic!("expected if statement, got {other:?}"),
+        };
+        assert_call(&then_call, vec![core_var("y")]);
+        assert_call(&else_call, vec![core_var("y")]);
+
+        let then_function = generated_function(&ctx, &then_call.name);
+        let else_function = generated_function(&ctx, &else_call.name);
+        let then_join = match &then_function.body {
+            core::Statement::Call(call) => call,
+            other => panic!("expected then branch to call join, got {other:?}"),
+        };
+        let else_join = match &else_function.body {
+            core::Statement::Call(call) => call,
+            other => panic!("expected else branch to call join, got {other:?}"),
+        };
+        assert_eq!(then_join.name, else_join.name);
+        assert_call(then_join, vec![core_var("y")]);
+        assert_call(else_join, vec![core_var("y")]);
+
+        let join_function = generated_function(&ctx, &then_join.name);
+        assert_eq!(
+            join_function.params,
+            vec![("y".to_string(), core::Type::Int)]
+        );
+        assert!(matches!(join_function.body, core::Statement::If(_, _, _)));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 use super::ast::{AssignOp, BinaryOp, Binding, Block, Expr, MethodCall, Program, Stmt};
 
