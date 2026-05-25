@@ -1,4 +1,4 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 
 use super::ast::{AssignOp, BinaryOp, Binding, Block, Expr, MethodCall, Program, Stmt};
 
@@ -585,6 +585,44 @@ mod tests {
         assert_eq!(
             program.statements,
             vec![Stmt::Assert(int(0)), Stmt::Assert(int(1))]
+        );
+    }
+
+    #[test]
+    fn parses_line_comments_as_whitespace() {
+        let program = parse_program(
+            r#"
+            // before a statement
+            let x = 1; // after a statement
+            if (x == 1) { // after a block opener
+              // inside a block
+              assert!(true);
+            } // before end of file
+            "#,
+        )
+        .expect("line comments should parse as whitespace");
+
+        assert_eq!(
+            program.statements,
+            vec![
+                Stmt::Let {
+                    binding: Binding {
+                        var: "x".to_string(),
+                    },
+                    value: int(1),
+                },
+                Stmt::If {
+                    cond: Expr::BinaryOp {
+                        lhs: Box::new(var("x")),
+                        op: BinaryOp::Eq,
+                        rhs: Box::new(int(1)),
+                    },
+                    then_block: Block {
+                        statements: vec![Stmt::Assert(int(1))],
+                    },
+                    else_block: None,
+                },
+            ]
         );
     }
 }

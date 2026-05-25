@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 
 use super::ast::{Expr, FuncCall, Function, OpKind, Program, Statement, Type};
 
@@ -287,4 +287,34 @@ pub fn parse_program(input: &str) -> Result<Program> {
         functions: map,
         init,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_line_comments_as_whitespace() {
+        let program = parse_program(
+            r#"
+            // before init
+            init = main() // after init
+
+            // before function
+            main() = () // before end of file
+            "#,
+        )
+        .expect("line comments should parse as whitespace");
+
+        assert_eq!(program.init.name, "main");
+        assert_eq!(program.init.args, vec![]);
+        assert_eq!(
+            program
+                .functions
+                .get("main")
+                .expect("main function should exist")
+                .body,
+            Statement::Unit
+        );
+    }
 }
