@@ -19,17 +19,40 @@ pub struct Function {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Int,
-    Sender,
-    Receiver,
+    Sender(Box<Type>),
+    Receiver(Box<Type>),
     Func { params: Vec<Type> },
 }
 
 impl Type {
+    pub fn sender(payload: Type) -> Self {
+        Type::Sender(Box::new(payload))
+    }
+
+    pub fn receiver(payload: Type) -> Self {
+        Type::Receiver(Box::new(payload))
+    }
+
+    pub fn int_sender() -> Self {
+        Type::sender(Type::Int)
+    }
+
+    pub fn int_receiver() -> Self {
+        Type::receiver(Type::Int)
+    }
+
+    pub fn payload(&self) -> Option<&Type> {
+        match self {
+            Type::Sender(payload) | Type::Receiver(payload) => Some(payload),
+            Type::Int | Type::Func { .. } => None,
+        }
+    }
+
     pub fn is_linear(&self) -> bool {
         match self {
             Type::Int => false,
-            Type::Sender => true,
-            Type::Receiver => true,
+            Type::Sender(_) => true,
+            Type::Receiver(_) => true,
             Type::Func { params: _ } => false,
         }
     }

@@ -74,7 +74,7 @@ impl Ctx {
         self.type_env
             .iter()
             .filter_map(|(var, ty)| match ty {
-                ast::Type::Sender => Some(var.clone()),
+                ast::Type::Sender(_) => Some(var.clone()),
                 _ => None,
             })
             .collect()
@@ -98,8 +98,8 @@ impl ast::Type {
     fn lower_to_chc(&self, setting: &Setting) -> Result<Type> {
         Ok(match self {
             ast::Type::Int => Type::Int,
-            ast::Type::Sender | ast::Type::Receiver => {
-                Type::prophecy(setting.no_timestamps, Type::Int)
+            ast::Type::Sender(payload) | ast::Type::Receiver(payload) => {
+                Type::prophecy(setting.no_timestamps, payload.lower_to_chc(setting)?)
             }
             ast::Type::Func { params } => {
                 let chc_params = params
@@ -183,10 +183,9 @@ impl ast::Statement {
                 ));
                 let out_channels = ctx.collect_out_channels();
                 for chan in out_channels {
-                    let chan_var = ctx.insert_declared_var(
-                        chan,
-                        Type::prophecy(ctx.setting.no_timestamps, Type::Int),
-                    )?;
+                    let chan_ty = ctx.get_ast_type(&chan)?.clone();
+                    let chan_var =
+                        ctx.insert_declared_var(chan, chan_ty.lower_to_chc(&ctx.setting)?)?;
                     constraints.push(Constraint::Eq(chan_var, Term::Nil));
                 }
                 vec![Body {
@@ -258,8 +257,8 @@ impl ast::Statement {
                 receiver,
                 body,
             } => {
-                ctx.insert_to_type_env(sender, ast::Type::Sender)?;
-                ctx.insert_to_type_env(receiver, ast::Type::Receiver)?;
+                ctx.insert_to_type_env(sender, ast::Type::int_sender())?;
+                ctx.insert_to_type_env(receiver, ast::Type::int_receiver())?;
                 let sender_var = ctx.insert_declared_var(
                     sender,
                     Type::prophecy(ctx.setting.no_timestamps, Type::Int),
@@ -287,10 +286,9 @@ impl ast::Statement {
                 body,
             } => {
                 let time_var = lctx.time_var.clone();
-                let sender_var = ctx.insert_declared_var(
-                    sender,
-                    Type::prophecy(ctx.setting.no_timestamps, Type::Int),
-                )?;
+                let sender_ty = ctx.get_ast_type(sender)?.clone();
+                let sender_chc_ty = sender_ty.lower_to_chc(&ctx.setting)?;
+                let sender_var = ctx.insert_declared_var(sender, sender_chc_ty.clone())?;
                 let new_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
                 let new_time_term = ctx.insert_declared_var(&new_time_var, Type::Int)?;
                 let value_term = value.lower_to_chc(ctx)?;
@@ -300,10 +298,7 @@ impl ast::Statement {
                 };
                 let mut body = body.lower_to_chc(ctx, &new_lctx)?;
                 let new_sender = ctx.gen_new_var(sender);
-                let new_sender_var = ctx.insert_declared_var(
-                    &new_sender,
-                    Type::prophecy(ctx.setting.no_timestamps, Type::Int),
-                )?;
+                let new_sender_var = ctx.insert_declared_var(&new_sender, sender_chc_ty)?;
                 body.substitute(&HashMap::from([(sender.clone(), new_sender)]));
                 vec![body.concat(Body {
                     predicates: vec![],
@@ -333,7 +328,12 @@ impl ast::Statement {
                 let new_time_term = ctx.insert_declared_var(&new_time_var, Type::Int)?;
                 let tmp_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
                 let tmp_time_term = ctx.insert_declared_var(&tmp_time_var, Type::Int)?;
-                ctx.type_env.insert(var.clone(), ast::Type::Int);
+                let receiver_ty = ctx.get_ast_type(receiver)?.clone();
+                let payload_ty = receiver_ty
+                    .payload()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("Variable {} is not a receiver", receiver))?;
+                ctx.type_env.insert(var.clone(), payload_ty.clone());
                 let mut body = body.lower_to_chc(
                     ctx,
                     &LocalCtx {
@@ -341,16 +341,12 @@ impl ast::Statement {
                         time_var: new_time_term.clone(),
                     },
                 )?;
-                let var_term = ctx.insert_declared_var(var, Type::Int)?;
-                let receiver_term = ctx.insert_declared_var(
-                    receiver,
-                    Type::prophecy(ctx.setting.no_timestamps, Type::Int),
-                )?;
+                let receiver_chc_ty = receiver_ty.lower_to_chc(&ctx.setting)?;
+                let var_term =
+                    ctx.insert_declared_var(var, payload_ty.lower_to_chc(&ctx.setting)?)?;
+                let receiver_term = ctx.insert_declared_var(receiver, receiver_chc_ty.clone())?;
                 let new_receiver = ctx.gen_new_var(receiver);
-                let new_receiver_term = ctx.insert_declared_var(
-                    &new_receiver,
-                    Type::prophecy(ctx.setting.no_timestamps, Type::Int),
-                )?;
+                let new_receiver_term = ctx.insert_declared_var(&new_receiver, receiver_chc_ty)?;
                 body.substitute(&HashMap::from([(receiver.clone(), new_receiver)]));
 
                 let time_constraints = if ctx.setting.no_timestamps {
@@ -383,20 +379,14 @@ impl ast::Statement {
                 .concat(body)]
             }
             ast::Statement::Dup { sender, var, body } => {
-                let sender_term = ctx.insert_declared_var(
-                    sender,
-                    Type::prophecy(ctx.setting.no_timestamps, Type::Int),
-                )?;
+                let sender_ty = ctx.get_ast_type(sender)?.clone();
+                let sender_chc_ty = sender_ty.lower_to_chc(&ctx.setting)?;
+                let sender_term = ctx.insert_declared_var(sender, sender_chc_ty.clone())?;
                 let new_sender_var = ctx.gen_new_var(sender);
-                let new_sender_term = ctx.insert_declared_var(
-                    &new_sender_var,
-                    Type::prophecy(ctx.setting.no_timestamps, Type::Int),
-                )?;
-                let var_term = ctx.insert_declared_var(
-                    var,
-                    Type::prophecy(ctx.setting.no_timestamps, Type::Int),
-                )?;
-                ctx.type_env.insert(var.clone(), ast::Type::Sender);
+                let new_sender_term =
+                    ctx.insert_declared_var(&new_sender_var, sender_chc_ty.clone())?;
+                let var_term = ctx.insert_declared_var(var, sender_chc_ty)?;
+                ctx.type_env.insert(var.clone(), sender_ty);
                 let mut body = body.lower_to_chc(ctx, lctx)?;
                 body.substitute(&HashMap::from([(sender.clone(), new_sender_var)]));
                 vec![Body {
@@ -424,7 +414,7 @@ impl ast::Function {
             let chc_type = param_type.lower_to_chc(&ctx.setting)?;
             ctx.insert_to_type_env(param_name, param_type.clone())?;
             ctx.insert_declared_var(param_name.clone(), chc_type)?;
-            if param_type == &ast::Type::Sender {
+            if matches!(param_type, ast::Type::Sender(_)) {
                 out_channels.push(param_name.clone());
             }
         }

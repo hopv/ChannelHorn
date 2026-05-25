@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 
 use super::ast::{Expr, FuncCall, Function, OpKind, Program, Statement, Type};
 
@@ -154,11 +154,18 @@ peg::parser! {
 
         rule sender_type() -> Type
             = quiet!{ "Sender" }
-              !ident_char() _() { Type::Sender }
+              payload:generic_type_arg()? !ident_char() _() {
+                  Type::sender(payload.unwrap_or(Type::Int))
+              }
 
         rule receiver_type() -> Type
             = quiet!{ "Receiver" }
-            !ident_char() _() { Type::Receiver }
+              payload:generic_type_arg()? !ident_char() _() {
+                  Type::receiver(payload.unwrap_or(Type::Int))
+              }
+
+        rule generic_type_arg() -> Type
+            = lt() ty:type_() gt() { ty }
 
         rule int_type() -> Type
             = quiet!{ "int" }
@@ -315,6 +322,54 @@ mod tests {
                 .expect("main function should exist")
                 .body,
             Statement::Unit
+        );
+    }
+
+    #[test]
+    fn parses_parameterized_channel_types() {
+        let program = parse_program(
+            r#"
+            init = main()
+
+            main(s: Sender<int>, r: Receiver<int>) = ()
+            "#,
+        )
+        .expect("parameterized channel types should parse");
+
+        let main = program
+            .functions
+            .get("main")
+            .expect("main function should exist");
+        assert_eq!(
+            main.params,
+            vec![
+                ("s".to_string(), Type::int_sender()),
+                ("r".to_string(), Type::int_receiver()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_bare_channel_types_as_int_channels() {
+        let program = parse_program(
+            r#"
+            init = main()
+
+            main(s: Sender, r: Receiver) = ()
+            "#,
+        )
+        .expect("bare channel types should parse as int channels");
+
+        let main = program
+            .functions
+            .get("main")
+            .expect("main function should exist");
+        assert_eq!(
+            main.params,
+            vec![
+                ("s".to_string(), Type::int_sender()),
+                ("r".to_string(), Type::int_receiver()),
+            ]
         );
     }
 }

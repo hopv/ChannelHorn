@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 use crate::core::ast as core;
 
@@ -167,8 +167,8 @@ fn desugar_stmt(
     match stmt {
         Stmt::LetChannel { sender, receiver } => {
             let mut next_env = env.clone();
-            next_env.insert(sender.clone(), core::Type::Sender);
-            next_env.insert(receiver.clone(), core::Type::Receiver);
+            next_env.insert(sender.clone(), core::Type::int_sender());
+            next_env.insert(receiver.clone(), core::Type::int_receiver());
             let body = continuation_call(ctx, statements, index, next_env, liveness, &[])?;
             Ok(core::Statement::New {
                 sender: sender.clone(),
@@ -180,7 +180,7 @@ fn desugar_stmt(
             Expr::MethodCall { receiver, method } if matches!(method, MethodCall::Recv) => {
                 let receiver = expect_var(receiver)?;
                 let mut next_env = env.clone();
-                ensure_type(&next_env, receiver, &core::Type::Receiver)?;
+                ensure_type(&next_env, receiver, &core::Type::int_receiver())?;
                 next_env.insert(binding.var.clone(), core::Type::Int);
                 let body = continuation_call(ctx, statements, index, next_env, liveness, &[])?;
                 Ok(core::Statement::Recv {
@@ -192,8 +192,8 @@ fn desugar_stmt(
             Expr::MethodCall { receiver, method } if matches!(method, MethodCall::Clone) => {
                 let sender = expect_var(receiver)?;
                 let mut next_env = env.clone();
-                ensure_type(&next_env, sender, &core::Type::Sender)?;
-                next_env.insert(binding.var.clone(), core::Type::Sender);
+                ensure_type(&next_env, sender, &core::Type::int_sender())?;
+                next_env.insert(binding.var.clone(), core::Type::int_sender());
                 let body = continuation_call(ctx, statements, index, next_env, liveness, &[])?;
                 Ok(core::Statement::Dup {
                     sender: sender.clone(),
@@ -231,7 +231,7 @@ fn desugar_stmt(
             Expr::MethodCall { receiver, method } => match method {
                 MethodCall::Send(value) => {
                     let sender = expect_var(receiver)?;
-                    ensure_type(&env, sender, &core::Type::Sender)?;
+                    ensure_type(&env, sender, &core::Type::int_sender())?;
                     let body = continuation_call(ctx, statements, index, env, liveness, &[])?;
                     Ok(core::Statement::Send {
                         sender: sender.clone(),
@@ -771,8 +771,8 @@ mod tests {
         assert_eq!(
             unit_function.params,
             vec![
-                ("s".to_string(), core::Type::Sender),
-                ("r".to_string(), core::Type::Receiver),
+                ("s".to_string(), core::Type::int_sender()),
+                ("r".to_string(), core::Type::int_receiver()),
             ]
         );
         assert_eq!(unit_function.body, core::Statement::Unit);
@@ -817,7 +817,7 @@ mod tests {
                 },
                 Stmt::Assert(var("v")),
             ],
-            env(&[("r", core::Type::Receiver)]),
+            env(&[("r", core::Type::int_receiver())]),
         );
 
         match stmt {
@@ -850,7 +850,7 @@ mod tests {
                     method: MethodCall::Drop,
                 }),
             ],
-            env(&[("s1", core::Type::Sender)]),
+            env(&[("s1", core::Type::int_sender())]),
         );
 
         match stmt {
@@ -904,7 +904,7 @@ mod tests {
                     method: MethodCall::Drop,
                 }),
             ],
-            env(&[("s", core::Type::Sender)]),
+            env(&[("s", core::Type::int_sender())]),
         );
 
         match stmt {
@@ -931,7 +931,7 @@ mod tests {
                 }),
                 Stmt::Assert(int(1)),
             ],
-            env(&[("s", core::Type::Sender)]),
+            env(&[("s", core::Type::int_sender())]),
         );
 
         let (drop_call, continuation) = match stmt {
@@ -944,7 +944,7 @@ mod tests {
         let drop_function = generated_function(&ctx, &drop_call.name);
         assert_eq!(
             drop_function.params,
-            vec![("s".to_string(), core::Type::Sender)]
+            vec![("s".to_string(), core::Type::int_sender())]
         );
         assert_eq!(drop_function.body, core::Statement::Unit);
     }
@@ -982,7 +982,7 @@ mod tests {
                     args: vec![var("x")],
                 },
             ],
-            env(&[("x", core::Type::Int), ("s", core::Type::Sender)]),
+            env(&[("x", core::Type::Int), ("s", core::Type::int_sender())]),
         );
 
         let then_call = match stmt {
@@ -1012,7 +1012,10 @@ mod tests {
         );
 
         let failure = generated_function(&ctx, "__sugar_1");
-        assert_eq!(failure.params, vec![("s".to_string(), core::Type::Sender)]);
+        assert_eq!(
+            failure.params,
+            vec![("s".to_string(), core::Type::int_sender())]
+        );
         assert_eq!(failure.body, core::Statement::Fail);
     }
 
@@ -1026,8 +1029,8 @@ mod tests {
             })],
             env(&[
                 ("x", core::Type::Int),
-                ("s", core::Type::Sender),
-                ("r", core::Type::Receiver),
+                ("s", core::Type::int_sender()),
+                ("r", core::Type::int_receiver()),
             ]),
         );
 
@@ -1052,8 +1055,8 @@ mod tests {
         assert_eq!(
             unit_function.params,
             vec![
-                ("s".to_string(), core::Type::Sender),
-                ("r".to_string(), core::Type::Receiver),
+                ("s".to_string(), core::Type::int_sender()),
+                ("r".to_string(), core::Type::int_receiver()),
             ]
         );
         assert_eq!(unit_function.body, core::Statement::Unit);
@@ -1061,8 +1064,8 @@ mod tests {
         assert_eq!(
             fail_function.params,
             vec![
-                ("s".to_string(), core::Type::Sender),
-                ("r".to_string(), core::Type::Receiver),
+                ("s".to_string(), core::Type::int_sender()),
+                ("r".to_string(), core::Type::int_receiver()),
             ]
         );
         assert_eq!(fail_function.body, core::Statement::Fail);
@@ -1086,7 +1089,10 @@ mod tests {
                     },
                 },
             ],
-            env(&[("s", core::Type::Sender), ("r", core::Type::Receiver)]),
+            env(&[
+                ("s", core::Type::int_sender()),
+                ("r", core::Type::int_receiver()),
+            ]),
         );
 
         let (spawned, continuation) = match stmt {
@@ -1099,13 +1105,13 @@ mod tests {
         let spawned_function = generated_function(&ctx, &spawned.name);
         assert_eq!(
             spawned_function.params,
-            vec![("s".to_string(), core::Type::Sender)]
+            vec![("s".to_string(), core::Type::int_sender())]
         );
 
         let continuation_function = generated_function(&ctx, &continuation.name);
         assert_eq!(
             continuation_function.params,
-            vec![("r".to_string(), core::Type::Receiver)]
+            vec![("r".to_string(), core::Type::int_receiver())]
         );
     }
 

@@ -48,8 +48,10 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Type::Int => write!(f, "int"),
-            Type::Sender => write!(f, "Sender"),
-            Type::Receiver => write!(f, "Receiver"),
+            Type::Sender(payload) if **payload == Type::Int => write!(f, "Sender"),
+            Type::Sender(payload) => write!(f, "Sender<{}>", payload),
+            Type::Receiver(payload) if **payload == Type::Int => write!(f, "Receiver"),
+            Type::Receiver(payload) => write!(f, "Receiver<{}>", payload),
             Type::Func { params } => {
                 let params = params
                     .iter()
