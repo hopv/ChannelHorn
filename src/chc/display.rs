@@ -52,8 +52,8 @@ impl fmt::Display for super::Type {
         match self {
             super::Type::Int => write!(f, "Int"),
             super::Type::Bool => write!(f, "Bool"),
-            super::Type::Prophecy => write!(f, "Lst"),
-            super::Type::TimestampedValue => write!(f, "Pair"),
+            super::Type::Lst(inner) => write!(f, "(Lst {})", inner),
+            super::Type::Pair(first, second) => write!(f, "(Pair {} {})", first, second),
             super::Type::Func { args } => {
                 let args_str: Vec<String> = args.iter().map(|arg| format!("{}", arg)).collect();
                 write!(f, "({}) Bool", args_str.join(" "))
@@ -114,30 +114,25 @@ impl fmt::Display for super::Clause {
     }
 }
 
-static PROLOGUE: &str = "\
+static DATATYPES_PROLOGUE: &str = "\
 (set-logic HORN)
 
-(declare-datatypes ((Pair 0))
-  (((mk (key Int) (val Int)))))             ; a pair (t,v)
+(declare-datatypes ((Pair 2))
+  ((par (A B) ((mk (key A) (val B))))))
 
-(declare-datatypes ((Lst 0))
-  (((nil) (cons (head Pair) (tail Lst))))) ; [] | (p :: rest)";
-
-static NO_TIMESTAMPS_PROLOGUE: &str = "\
-(set-logic HORN)
-
-(declare-datatypes ((Lst 0))
-  (((nil) (cons (head Int) (tail Lst))))) ; [] | (n :: rest)";
+(declare-datatypes ((Lst 1))
+  ((par (T) ((nil) (cons (head T) (tail (Lst T)))))))";
 
 static EPILOGUE: &str = "(check-sat)";
 
+fn write_prologue(f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "{DATATYPES_PROLOGUE}\n\n",)
+}
+
 impl fmt::Display for super::CHC {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.setting.no_timestamps {
-            write!(f, "{}\n\n", NO_TIMESTAMPS_PROLOGUE)?;
-        } else {
-            write!(f, "{}\n\n", PROLOGUE)?;
-        }
+        write_prologue(f)?;
+        write!(f, "\n\n")?;
         let fun_declarations_str: Vec<String> = self
             .fun_declarations
             .iter()
