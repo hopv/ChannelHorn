@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use crate::core::ast::Type;
+
 pub type VarName = String;
 pub type FuncName = String;
 
@@ -20,6 +22,7 @@ pub enum Stmt {
         value: Expr,
     },
     LetChannel {
+        payload: Type,
         sender: VarName,
         receiver: VarName,
     },
@@ -211,6 +214,7 @@ mod tests {
         let program = Program {
             statements: vec![
                 Stmt::LetChannel {
+                    payload: Type::Int,
                     sender: "s".to_string(),
                     receiver: "r".to_string(),
                 },
@@ -236,6 +240,7 @@ mod tests {
         assert_eq!(
             program.statements[0],
             Stmt::LetChannel {
+                payload: Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
             }

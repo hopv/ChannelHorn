@@ -1,5 +1,7 @@
 use anyhow::{Result, anyhow};
 
+use crate::core::ast::Type;
+
 use super::ast::{AssignOp, BinaryOp, Binding, Block, Expr, MethodCall, Program, Stmt};
 
 peg::parser! {
@@ -26,8 +28,12 @@ peg::parser! {
             }
 
         rule let_channel_stmt() -> Stmt
-            = kw_let() sender:ident() comma() receiver:ident() assign() kw_channel() lparen() rparen() semi() {
-                Stmt::LetChannel { sender, receiver }
+            = kw_let() sender:ident() comma() receiver:ident() assign() kw_channel() payload:generic_type_arg()? lparen() rparen() semi() {
+                Stmt::LetChannel {
+                    payload: payload.unwrap_or(Type::Int),
+                    sender,
+                    receiver,
+                }
             }
 
         rule let_stmt() -> Stmt
@@ -169,6 +175,30 @@ peg::parser! {
 
         rule variable() -> Expr
             = name:ident() { Expr::Var(name) }
+
+        rule type_() -> Type
+            = sender_type()
+            / receiver_type()
+            / int_type()
+
+        rule sender_type() -> Type
+            = quiet!{ "Sender" }
+              payload:generic_type_arg()? !ident_char() _() {
+                  Type::sender(payload.unwrap_or(Type::Int))
+              }
+
+        rule receiver_type() -> Type
+            = quiet!{ "Receiver" }
+              payload:generic_type_arg()? !ident_char() _() {
+                  Type::receiver(payload.unwrap_or(Type::Int))
+              }
+
+        rule generic_type_arg() -> Type
+            = lt() ty:type_() gt() { ty }
+
+        rule int_type() -> Type
+            = quiet!{ "int" }
+              !ident_char() _() { Type::Int }
 
         rule equality_op() -> BinaryOp
             = eqeq() { BinaryOp::Eq }
@@ -358,6 +388,7 @@ mod tests {
             program.statements,
             vec![
                 Stmt::LetChannel {
+                    payload: Type::Int,
                     sender: "s".to_string(),
                     receiver: "r".to_string(),
                 },
@@ -379,6 +410,25 @@ mod tests {
                     method: MethodCall::Drop,
                 }),
             ]
+        );
+    }
+
+    #[test]
+    fn parses_typed_channel_payload() {
+        let program = parse_program(
+            r#"
+            let s, r = channel<Sender<int>>();
+            "#,
+        )
+        .expect("typed channel should parse");
+
+        assert_eq!(
+            program.statements,
+            vec![Stmt::LetChannel {
+                payload: Type::int_sender(),
+                sender: "s".to_string(),
+                receiver: "r".to_string(),
+            }]
         );
     }
 
@@ -450,6 +500,7 @@ mod tests {
             program.statements,
             vec![
                 Stmt::LetChannel {
+                    payload: Type::Int,
                     sender: "s1".to_string(),
                     receiver: "r".to_string(),
                 },

@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use channel_rust_impl::chc;
 use channel_rust_impl::core::{eval, parser};
 use channel_rust_impl::sugar;

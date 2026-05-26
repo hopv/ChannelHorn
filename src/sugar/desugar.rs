@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 use crate::core::ast as core;
 
@@ -165,12 +165,19 @@ fn desugar_stmt(
 ) -> Result<core::Statement> {
     let stmt = &statements[index];
     match stmt {
-        Stmt::LetChannel { sender, receiver } => {
+        Stmt::LetChannel {
+            payload,
+            sender,
+            receiver,
+        } => {
             let mut next_env = env.clone();
-            next_env.insert(sender.clone(), core::Type::int_sender());
-            next_env.insert(receiver.clone(), core::Type::int_receiver());
+            let sender_ty = core::Type::sender(payload.clone());
+            let receiver_ty = core::Type::receiver(payload.clone());
+            next_env.insert(sender.clone(), sender_ty);
+            next_env.insert(receiver.clone(), receiver_ty);
             let body = continuation_call(ctx, statements, index, next_env, liveness, &[])?;
             Ok(core::Statement::New {
+                payload: payload.clone(),
                 sender: sender.clone(),
                 receiver: receiver.clone(),
                 body,
@@ -180,8 +187,8 @@ fn desugar_stmt(
             Expr::MethodCall { receiver, method } if matches!(method, MethodCall::Recv) => {
                 let receiver = expect_var(receiver)?;
                 let mut next_env = env.clone();
-                ensure_type(&next_env, receiver, &core::Type::int_receiver())?;
-                next_env.insert(binding.var.clone(), core::Type::Int);
+                let payload = ensure_receiver_payload(&next_env, receiver)?.clone();
+                next_env.insert(binding.var.clone(), payload);
                 let body = continuation_call(ctx, statements, index, next_env, liveness, &[])?;
                 Ok(core::Statement::Recv {
                     receiver: receiver.clone(),
@@ -192,8 +199,8 @@ fn desugar_stmt(
             Expr::MethodCall { receiver, method } if matches!(method, MethodCall::Clone) => {
                 let sender = expect_var(receiver)?;
                 let mut next_env = env.clone();
-                ensure_type(&next_env, sender, &core::Type::int_sender())?;
-                next_env.insert(binding.var.clone(), core::Type::int_sender());
+                let sender_ty = ensure_sender_type(&next_env, sender)?.clone();
+                next_env.insert(binding.var.clone(), sender_ty);
                 let body = continuation_call(ctx, statements, index, next_env, liveness, &[])?;
                 Ok(core::Statement::Dup {
                     sender: sender.clone(),
@@ -231,11 +238,20 @@ fn desugar_stmt(
             Expr::MethodCall { receiver, method } => match method {
                 MethodCall::Send(value) => {
                     let sender = expect_var(receiver)?;
-                    ensure_type(&env, sender, &core::Type::int_sender())?;
-                    let body = continuation_call(ctx, statements, index, env, liveness, &[])?;
+                    let payload = ensure_sender_payload(&env, sender)?;
+                    let value_ty = infer_expr_type(value, &env)?;
+                    ensure_type_matches(payload, &value_ty)?;
+                    let value_expr = lower_expr(value)?;
+                    let mut next_env = env.clone();
+                    if value_ty.is_linear() {
+                        for var in value.free_vars() {
+                            next_env.remove(&var);
+                        }
+                    }
+                    let body = continuation_call(ctx, statements, index, next_env, liveness, &[])?;
                     Ok(core::Statement::Send {
                         sender: sender.clone(),
-                        value: lower_expr(value)?,
+                        value: value_expr,
                         body,
                     })
                 }
@@ -547,6 +563,38 @@ fn ensure_type(env: &Env, var: &str, expected: &core::Type) -> Result<()> {
     }
 }
 
+fn ensure_type_matches(expected: &core::Type, actual: &core::Type) -> Result<()> {
+    if expected == actual {
+        Ok(())
+    } else {
+        bail!("expected type {expected:?}, got {actual:?}")
+    }
+}
+
+fn ensure_sender_type<'a>(env: &'a Env, var: &str) -> Result<&'a core::Type> {
+    match env.get(var) {
+        Some(ty @ core::Type::Sender(_)) => Ok(ty),
+        Some(ty) => bail!("expected variable {var} to be a sender, got {ty:?}"),
+        None => bail!("undefined variable {var}"),
+    }
+}
+
+fn ensure_sender_payload<'a>(env: &'a Env, var: &str) -> Result<&'a core::Type> {
+    match env.get(var) {
+        Some(core::Type::Sender(payload)) => Ok(payload),
+        Some(ty) => bail!("expected variable {var} to be a sender, got {ty:?}"),
+        None => bail!("undefined variable {var}"),
+    }
+}
+
+fn ensure_receiver_payload<'a>(env: &'a Env, var: &str) -> Result<&'a core::Type> {
+    match env.get(var) {
+        Some(core::Type::Receiver(payload)) => Ok(payload),
+        Some(ty) => bail!("expected variable {var} to be a receiver, got {ty:?}"),
+        None => bail!("undefined variable {var}"),
+    }
+}
+
 fn ensure_linear<'a>(env: &'a Env, var: &str) -> Result<&'a core::Type> {
     match env.get(var) {
         Some(ty) if ty.is_linear() => Ok(ty),
@@ -678,7 +726,9 @@ fn used_vars(stmt: &Stmt) -> BTreeSet<VarName> {
 fn defined_vars(stmt: &Stmt) -> BTreeSet<VarName> {
     match stmt {
         Stmt::Let { binding, .. } => [binding.var.clone()].into(),
-        Stmt::LetChannel { sender, receiver } => [sender.clone(), receiver.clone()].into(),
+        Stmt::LetChannel {
+            sender, receiver, ..
+        } => [sender.clone(), receiver.clone()].into(),
         Stmt::Assign { target, .. } => [target.clone()].into(),
         Stmt::Expr(_)
         | Stmt::Call { .. }
@@ -700,7 +750,9 @@ fn block_free_vars(block: &ast::Block) -> BTreeSet<VarName> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::eval::Evaluator;
     use crate::sugar::ast::Binding;
+    use crate::sugar::{check, parser};
 
     fn binding(name: &str) -> Binding {
         Binding {
@@ -750,6 +802,7 @@ mod tests {
     fn let_channel_statement_becomes_new() {
         let (stmt, ctx) = convert_first_stmt(
             vec![Stmt::LetChannel {
+                payload: core::Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
             }],
@@ -759,6 +812,7 @@ mod tests {
         assert_eq!(
             stmt,
             core::Statement::New {
+                payload: core::Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
                 body: core::FuncCall {
@@ -776,6 +830,68 @@ mod tests {
             ]
         );
         assert_eq!(unit_function.body, core::Statement::Unit);
+    }
+
+    #[test]
+    fn typed_channel_payload_program_runs_after_desugaring() {
+        let sugar_program = parser::parse_program(
+            r#"
+            let s, r = channel<Sender<int>>();
+            let inner_s, inner_r = channel();
+            s.send(inner_s);
+            let received_s = r.recv();
+            received_s.send(1);
+            let x = inner_r.recv();
+            assert!(x == 1);
+            "#,
+        )
+        .expect("sugar program should parse");
+        check::check_program(&sugar_program).expect("sugar program should type check");
+        let core_program = desugar_program(&sugar_program).expect("sugar program should desugar");
+        let mut evaluator = Evaluator::new(core_program).expect("evaluator should initialize");
+
+        for _ in 0..100 {
+            if evaluator.is_done() {
+                return;
+            }
+            evaluator.step().expect("evaluation should not fail");
+        }
+
+        panic!("evaluation did not finish");
+    }
+
+    #[test]
+    fn typed_let_channel_statement_becomes_typed_new() {
+        let payload = core::Type::int_sender();
+        let (stmt, ctx) = convert_first_stmt(
+            vec![Stmt::LetChannel {
+                payload: payload.clone(),
+                sender: "s".to_string(),
+                receiver: "r".to_string(),
+            }],
+            Env::new(),
+        );
+
+        assert_eq!(
+            stmt,
+            core::Statement::New {
+                payload: payload.clone(),
+                sender: "s".to_string(),
+                receiver: "r".to_string(),
+                body: core::FuncCall {
+                    name: "__sugar_0".to_string(),
+                    args: vec![core_var("s"), core_var("r")],
+                },
+            }
+        );
+        let unit_function = generated_function(&ctx, "__sugar_0");
+        assert_eq!(
+            unit_function.params,
+            vec![
+                ("s".to_string(), core::Type::sender(payload.clone())),
+                ("r".to_string(), core::Type::receiver(payload)),
+            ]
+        );
     }
 
     #[test]
@@ -916,6 +1032,41 @@ mod tests {
                 assert_eq!(sender, "s");
                 assert_eq!(value, core::Expr::Num(1));
                 assert_call(&body, vec![core_var("s")]);
+            }
+            other => panic!("expected send statement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn send_statement_moves_linear_payload() {
+        let (stmt, ctx) = convert_first_stmt(
+            vec![Stmt::Expr(Expr::MethodCall {
+                receiver: Box::new(var("s")),
+                method: MethodCall::Send(Box::new(var("inner_s"))),
+            })],
+            env(&[
+                ("s", core::Type::sender(core::Type::int_sender())),
+                ("inner_s", core::Type::int_sender()),
+            ]),
+        );
+
+        match stmt {
+            core::Statement::Send {
+                sender,
+                value,
+                body,
+            } => {
+                assert_eq!(sender, "s");
+                assert_eq!(value, core_var("inner_s"));
+                assert_call(&body, vec![core_var("s")]);
+                let unit_function = generated_function(&ctx, &body.name);
+                assert_eq!(
+                    unit_function.params,
+                    vec![(
+                        "s".to_string(),
+                        core::Type::sender(core::Type::int_sender())
+                    )]
+                );
             }
             other => panic!("expected send statement, got {other:?}"),
         }

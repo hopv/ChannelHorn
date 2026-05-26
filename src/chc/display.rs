@@ -26,7 +26,7 @@ impl fmt::Display for Term {
             Term::Gt(term, term1) => write!(f, "(ite (> {} {}) 1 0)", term, term1),
             Term::Ge(term, term1) => write!(f, "(ite (>= {} {}) 1 0)", term, term1),
             Term::Cons(head, tail) => write!(f, "(cons {} {})", head, tail),
-            Term::Nil => write!(f, "nil"),
+            Term::Nil(ty) => write!(f, "(as nil {})", ty),
             Term::Pair(first, second) => write!(f, "(mk {} {})", first, second),
             Term::Head(term) => write!(f, "(head {})", term),
             Term::Tail(term) => write!(f, "(tail {})", term),

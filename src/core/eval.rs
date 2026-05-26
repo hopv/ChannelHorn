@@ -21,7 +21,7 @@ pub struct Thread {
     pub env: HashMap<VarName, Value>,
 }
 
-type Channel = Rc<RefCell<VecDeque<i32>>>;
+type Channel = Rc<RefCell<VecDeque<Value>>>;
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -138,6 +138,7 @@ impl Evaluator {
                 Ok(Some(Statement::Call(func_call)))
             }
             Statement::New {
+                payload: _,
                 sender,
                 receiver,
                 body,
@@ -163,13 +164,9 @@ impl Evaluator {
                     anyhow::anyhow!("Undefined variable for sender: {:?}", sender)
                 })?;
                 let value = value.step(env)?;
-                let int_value = match value {
-                    Value::Int(n) => n,
-                    _ => bail!("Can only send integer values"),
-                };
                 match sender_value {
                     Value::Sender(channel) => {
-                        channel.borrow_mut().push_back(int_value);
+                        channel.borrow_mut().push_back(value);
                     }
                     _ => bail!("Variable is not a sender: {:?}", sender),
                 }
@@ -188,7 +185,7 @@ impl Evaluator {
                         let mut channel = channel.borrow_mut();
                         if let Some(received_value) = channel.pop_front() {
                             let fresh_var = Self::fresh_var(&self.fresh_num);
-                            env.insert(fresh_var.clone(), Value::Int(received_value));
+                            env.insert(fresh_var.clone(), received_value);
                             let mut body = body.clone();
                             body.substitute_var(&HashMap::from([(var.clone(), fresh_var)]));
                             Ok(Some(Statement::Call(body.clone())))
@@ -321,5 +318,41 @@ impl Expr {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::parser;
+
+    #[test]
+    fn can_send_and_receive_channel_values() {
+        let program = parser::parse_program(
+            r#"
+            init = main()
+
+            main() = new<Sender<int>> s, r in make(s, r)
+            make(s: Sender<Sender<int>>, r: Receiver<Sender<int>>) = new is, ir in send_inner(s, r, is, ir)
+            send_inner(s: Sender<Sender<int>>, r: Receiver<Sender<int>>, is: Sender, ir: Receiver) = send is to s; use_received_sender(r, ir)
+            use_received_sender(r: Receiver<Sender<int>>, ir: Receiver<int>) = let received_s = recv r in send_on_received(received_s, ir)
+            send_on_received(received_s: Sender, ir: Receiver<int>) = send 1 to received_s; read_int(ir)
+            read_int(ir: Receiver) = let x = recv ir in check_int(x)
+            check_int(x: int) = if x == 1 then unit() else fail()
+            unit() = ()
+            fail() = fail
+            "#,
+        )
+        .expect("program should parse");
+        let mut evaluator = Evaluator::new(program).expect("evaluator should initialize");
+
+        for _ in 0..100 {
+            if evaluator.is_done() {
+                return;
+            }
+            evaluator.step().expect("evaluation should not fail");
+        }
+
+        panic!("evaluation did not finish");
     }
 }

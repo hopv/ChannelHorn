@@ -66,6 +66,7 @@ pub enum Statement {
     If(Expr, FuncCall, FuncCall),
     Spawn(FuncCall, FuncCall),
     New {
+        payload: Type,
         sender: VarName,
         receiver: VarName,
         body: FuncCall,

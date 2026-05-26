@@ -36,7 +36,7 @@ pub enum Term {
     Gt(Box<Term>, Box<Term>),
     Ge(Box<Term>, Box<Term>),
     Cons(Box<Term>, Box<Term>),
-    Nil,
+    Nil(Type),
     Head(Box<Term>),
     Tail(Box<Term>),
     Pair(Box<Term>, Box<Term>),
@@ -70,7 +70,7 @@ impl Term {
             Term::Head(t) | Term::Tail(t) | Term::Key(t) | Term::Val(t) => {
                 t.substitute(var_map);
             }
-            Term::Int(_) | Term::Bool(_) | Term::Nil => {}
+            Term::Int(_) | Term::Bool(_) | Term::Nil(_) => {}
         }
     }
 }
@@ -97,7 +97,7 @@ impl Constraint {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Int,
     Bool,
@@ -117,6 +117,29 @@ impl Type {
 
     pub fn timestamped_value(ty: Type) -> Self {
         Type::Pair(Box::new(Type::Int), Box::new(ty))
+    }
+
+    fn predicate_suffix(&self) -> String {
+        match self {
+            Type::Int => "Int".to_string(),
+            Type::Bool => "Bool".to_string(),
+            Type::Lst(inner) => format!("Lst_{}", inner.predicate_suffix()),
+            Type::Pair(first, second) => {
+                format!(
+                    "Pair_{}_{}",
+                    first.predicate_suffix(),
+                    second.predicate_suffix()
+                )
+            }
+            Type::Func { args } => {
+                let args = args
+                    .iter()
+                    .map(Type::predicate_suffix)
+                    .collect::<Vec<_>>()
+                    .join("_");
+                format!("Func_{}", args)
+            }
+        }
     }
 }
 
@@ -173,18 +196,48 @@ pub static MERGE_PREDICATE: &str = "%Merge";
 
 impl CHC {
     pub fn init_premitive(setting: &Setting) -> Self {
-        let prophecy_ty = Type::prophecy(setting.no_timestamps, Type::Int);
-        let timestamped_value_ty = Type::timestamped_value(Type::Int);
-        let mut fun_declarations = HashMap::new();
-        fun_declarations.insert(SORTED_PREDICATE.to_string(), vec![prophecy_ty.clone()]);
-        fun_declarations.insert(
-            MERGE_PREDICATE.to_string(),
-            vec![
-                prophecy_ty.clone(),
-                prophecy_ty.clone(),
-                prophecy_ty.clone(),
-            ],
-        );
+        CHC {
+            clauses: vec![],
+            fun_declarations: HashMap::new(),
+            setting: setting.clone(),
+        }
+    }
+
+    pub fn primitive_predicate_names(payload_ty: &Type) -> (PredicateName, PredicateName) {
+        if payload_ty == &Type::Int {
+            (SORTED_PREDICATE.to_string(), MERGE_PREDICATE.to_string())
+        } else {
+            let suffix = payload_ty.predicate_suffix();
+            (
+                format!("{}${}", SORTED_PREDICATE, suffix),
+                format!("{}${}", MERGE_PREDICATE, suffix),
+            )
+        }
+    }
+
+    pub fn primitive_fun_declarations(
+        setting: &Setting,
+        payload_ty: Type,
+    ) -> HashMap<PredicateName, Vec<Type>> {
+        let prophecy_ty = Type::prophecy(setting.no_timestamps, payload_ty.clone());
+        let (sorted_predicate, merge_predicate) = Self::primitive_predicate_names(&payload_ty);
+        HashMap::from([
+            (sorted_predicate, vec![prophecy_ty.clone()]),
+            (
+                merge_predicate,
+                vec![
+                    prophecy_ty.clone(),
+                    prophecy_ty.clone(),
+                    prophecy_ty.clone(),
+                ],
+            ),
+        ])
+    }
+
+    pub fn primitive_clauses(setting: &Setting, payload_ty: Type) -> Vec<Clause> {
+        let prophecy_ty = Type::prophecy(setting.no_timestamps, payload_ty.clone());
+        let timestamped_value_ty = Type::timestamped_value(payload_ty.clone());
+        let (sorted_predicate, merge_predicate) = Self::primitive_predicate_names(&payload_ty);
         let mut clauses = vec![];
 
         if !setting.no_timestamps {
@@ -192,8 +245,8 @@ impl CHC {
                 Clause {
                     forall: vec![],
                     head: Some(PredicateAtom {
-                        name: SORTED_PREDICATE.to_string(),
-                        args: vec![Term::Nil],
+                        name: sorted_predicate.clone(),
+                        args: vec![Term::Nil(prophecy_ty.clone())],
                     }),
                     body: Body {
                         predicates: vec![],
@@ -206,14 +259,17 @@ impl CHC {
                         ("p".to_string(), timestamped_value_ty.clone()),
                     ],
                     head: Some(PredicateAtom {
-                        name: SORTED_PREDICATE.to_string(),
+                        name: sorted_predicate.clone(),
                         args: vec![Term::Var("l".to_string())],
                     }),
                     body: Body {
                         predicates: vec![],
                         constraints: vec![Constraint::Eq(
                             Term::Var("l".to_string()),
-                            Term::Cons(Term::Var("p".to_string()).into(), Term::Nil.into()),
+                            Term::Cons(
+                                Term::Var("p".to_string()).into(),
+                                Term::Nil(prophecy_ty.clone()).into(),
+                            ),
                         )],
                     },
                 },
@@ -226,12 +282,12 @@ impl CHC {
                         ("p2".to_string(), timestamped_value_ty.clone()),
                     ],
                     head: Some(PredicateAtom {
-                        name: SORTED_PREDICATE.to_string(),
+                        name: sorted_predicate.clone(),
                         args: vec![Term::Var("l".to_string())],
                     }),
                     body: Body {
                         predicates: vec![PredicateAtom {
-                            name: SORTED_PREDICATE.to_string(),
+                            name: sorted_predicate,
                             args: vec![Term::Var("l2".to_string())],
                         }],
                         constraints: vec![
@@ -266,10 +322,10 @@ impl CHC {
             Clause {
                 forall: vec![("l".to_string(), prophecy_ty.clone())],
                 head: Some(PredicateAtom {
-                    name: MERGE_PREDICATE.to_string(),
+                    name: merge_predicate.clone(),
                     args: vec![
                         Term::Var("l".to_string()),
-                        Term::Nil,
+                        Term::Nil(prophecy_ty.clone()),
                         Term::Var("l".to_string()),
                     ],
                 }),
@@ -278,9 +334,9 @@ impl CHC {
             Clause {
                 forall: vec![("l".to_string(), prophecy_ty.clone())],
                 head: Some(PredicateAtom {
-                    name: MERGE_PREDICATE.to_string(),
+                    name: merge_predicate.clone(),
                     args: vec![
-                        Term::Nil,
+                        Term::Nil(prophecy_ty.clone()),
                         Term::Var("l".to_string()),
                         Term::Var("l".to_string()),
                     ],
@@ -297,14 +353,14 @@ impl CHC {
                     (
                         "p".to_string(),
                         if setting.no_timestamps {
-                            Type::Int
+                            payload_ty.clone()
                         } else {
                             timestamped_value_ty.clone()
                         },
                     ),
                 ],
                 head: Some(PredicateAtom {
-                    name: MERGE_PREDICATE.to_string(),
+                    name: merge_predicate.clone(),
                     args: vec![
                         Term::Var("l1".to_string()),
                         Term::Var("l2".to_string()),
@@ -313,7 +369,7 @@ impl CHC {
                 }),
                 body: Body {
                     predicates: vec![PredicateAtom {
-                        name: MERGE_PREDICATE.to_string(),
+                        name: merge_predicate.clone(),
                         args: vec![
                             Term::Var("l1tail".to_string()),
                             Term::Var("l2".to_string()),
@@ -348,14 +404,14 @@ impl CHC {
                     (
                         "p".to_string(),
                         if setting.no_timestamps {
-                            Type::Int
+                            payload_ty.clone()
                         } else {
                             timestamped_value_ty.clone()
                         },
                     ),
                 ],
                 head: Some(PredicateAtom {
-                    name: MERGE_PREDICATE.to_string(),
+                    name: merge_predicate.clone(),
                     args: vec![
                         Term::Var("l1".to_string()),
                         Term::Var("l2".to_string()),
@@ -364,7 +420,7 @@ impl CHC {
                 }),
                 body: Body {
                     predicates: vec![PredicateAtom {
-                        name: MERGE_PREDICATE.to_string(),
+                        name: merge_predicate,
                         args: vec![
                             Term::Var("l1".to_string()),
                             Term::Var("l2tail".to_string()),
@@ -393,10 +449,6 @@ impl CHC {
 
         clauses.extend(merge);
 
-        CHC {
-            clauses,
-            fun_declarations,
-            setting: setting.clone(),
-        }
+        clauses
     }
 }

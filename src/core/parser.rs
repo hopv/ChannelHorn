@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 
 use super::ast::{Expr, FuncCall, Function, OpKind, Program, Statement, Type};
 
@@ -49,8 +49,13 @@ peg::parser! {
             }
 
         rule new_stmt() -> Statement
-            = kw_new() sender:ident() comma() receiver:ident() kw_in() body:func_call() {
-                Statement::New { sender, receiver, body }
+            = kw_new() payload:generic_type_arg()? sender:ident() comma() receiver:ident() kw_in() body:func_call() {
+                Statement::New {
+                    payload: payload.unwrap_or(Type::Int),
+                    sender,
+                    receiver,
+                    body,
+                }
             }
 
         rule send_stmt() -> Statement
@@ -370,6 +375,36 @@ mod tests {
                 ("s".to_string(), Type::int_sender()),
                 ("r".to_string(), Type::int_receiver()),
             ]
+        );
+    }
+
+    #[test]
+    fn parses_new_payload_type_annotation() {
+        let program = parse_program(
+            r#"
+            init = main()
+
+            main() = new<Sender<int>> s, r in done(s, r)
+            done(s: Sender<Sender<int>>, r: Receiver<Sender<int>>) = ()
+            "#,
+        )
+        .expect("new payload type annotation should parse");
+
+        let main = program
+            .functions
+            .get("main")
+            .expect("main function should exist");
+        assert_eq!(
+            main.body,
+            Statement::New {
+                payload: Type::int_sender(),
+                sender: "s".to_string(),
+                receiver: "r".to_string(),
+                body: FuncCall {
+                    name: "done".to_string(),
+                    args: vec![Expr::Var("s".to_string()), Expr::Var("r".to_string())],
+                },
+            }
         );
     }
 }

@@ -75,10 +75,17 @@ impl fmt::Display for Statement {
             }
             Statement::Spawn(first, second) => write!(f, "spawn({}); {}", first, second),
             Statement::New {
+                payload,
                 sender,
                 receiver,
                 body,
-            } => write!(f, "new {}, {} in {}", sender, receiver, body),
+            } if *payload == Type::Int => write!(f, "new {}, {} in {}", sender, receiver, body),
+            Statement::New {
+                payload,
+                sender,
+                receiver,
+                body,
+            } => write!(f, "new<{}> {}, {} in {}", payload, sender, receiver, body),
             Statement::Send {
                 sender,
                 value,

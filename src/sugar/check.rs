@@ -1,12 +1,14 @@
 use std::collections::{BTreeSet, HashMap};
 
+use crate::core::ast as core;
+
 use super::ast::{AssignOp, BinaryOp, Block, Expr, MethodCall, Program, Stmt};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Int,
-    Sender,
-    Receiver,
+    Sender(Box<Type>),
+    Receiver(Box<Type>),
     Unit,
 }
 
@@ -106,9 +108,14 @@ fn check_stmt(stmt: &Stmt, env: &mut Env) -> Result<(), CheckError> {
             env.declare(binding.var.clone(), ty);
             Ok(())
         }
-        Stmt::LetChannel { sender, receiver } => {
-            env.declare(sender.clone(), Type::Sender);
-            env.declare(receiver.clone(), Type::Receiver);
+        Stmt::LetChannel {
+            payload,
+            sender,
+            receiver,
+        } => {
+            let payload = Type::from_core(payload);
+            env.declare(sender.clone(), Type::sender(payload.clone()));
+            env.declare(receiver.clone(), Type::receiver(payload));
             Ok(())
         }
         Stmt::Assign { target, op, value } => {
@@ -214,20 +221,35 @@ fn check_method_call(
     let receiver_var = expect_receiver_var(receiver)?;
     match method {
         MethodCall::Send(value) => {
-            expect_var_type(env, receiver_var, Type::Sender)?;
+            let sender_ty = env.ty_of(receiver_var)?;
+            let payload =
+                sender_ty
+                    .payload_for_sender()
+                    .ok_or_else(|| CheckError::TypeMismatch {
+                        expected: Type::int_sender(),
+                        actual: sender_ty.clone(),
+                    })?;
             let value_ty = check_expr(value, env)?;
-            expect_type(Type::Int, value_ty)?;
+            expect_type(payload.clone(), value_ty)?;
+            consume_linear_vars_in_expr(value, env)?;
             Ok(Type::Unit)
         }
         MethodCall::Recv => {
-            expect_var_type(env, receiver_var, Type::Receiver)?;
-            Ok(Type::Int)
+            let receiver_ty = env.ty_of(receiver_var)?;
+            let payload =
+                receiver_ty
+                    .payload_for_receiver()
+                    .ok_or_else(|| CheckError::TypeMismatch {
+                        expected: Type::int_receiver(),
+                        actual: receiver_ty.clone(),
+                    })?;
+            Ok(payload.clone())
         }
         MethodCall::Drop => {
             let ty = env.ty_of(receiver_var)?;
             if !ty.is_linear() {
                 return Err(CheckError::TypeMismatch {
-                    expected: Type::Sender,
+                    expected: Type::int_sender(),
                     actual: ty,
                 });
             }
@@ -235,8 +257,14 @@ fn check_method_call(
             Ok(Type::Unit)
         }
         MethodCall::Clone => {
-            expect_var_type(env, receiver_var, Type::Sender)?;
-            Ok(Type::Sender)
+            let sender_ty = env.ty_of(receiver_var)?;
+            if !matches!(sender_ty, Type::Sender(_)) {
+                return Err(CheckError::TypeMismatch {
+                    expected: Type::int_sender(),
+                    actual: sender_ty,
+                });
+            }
+            Ok(sender_ty)
         }
     }
 }
@@ -245,7 +273,7 @@ fn expect_receiver_var(expr: &Expr) -> Result<&str, CheckError> {
     match expr {
         Expr::Var(var) => Ok(var),
         _ => Err(CheckError::TypeMismatch {
-            expected: Type::Sender,
+            expected: Type::int_sender(),
             actual: Type::Int,
         }),
     }
@@ -264,9 +292,62 @@ fn expect_type(expected: Type, actual: Type) -> Result<(), CheckError> {
     }
 }
 
+fn consume_linear_vars_in_expr(expr: &Expr, env: &mut Env) -> Result<(), CheckError> {
+    for var in expr.free_vars() {
+        let should_consume = env
+            .vars
+            .get(&var)
+            .map(|binding| binding.ty.is_linear())
+            .unwrap_or(false);
+        if should_consume {
+            env.consume(&var)?;
+        }
+    }
+    Ok(())
+}
+
 impl Type {
+    fn sender(payload: Type) -> Self {
+        Type::Sender(Box::new(payload))
+    }
+
+    fn receiver(payload: Type) -> Self {
+        Type::Receiver(Box::new(payload))
+    }
+
+    fn int_sender() -> Self {
+        Type::sender(Type::Int)
+    }
+
+    fn int_receiver() -> Self {
+        Type::receiver(Type::Int)
+    }
+
+    fn from_core(ty: &core::Type) -> Self {
+        match ty {
+            core::Type::Int => Type::Int,
+            core::Type::Sender(payload) => Type::sender(Type::from_core(payload)),
+            core::Type::Receiver(payload) => Type::receiver(Type::from_core(payload)),
+            core::Type::Func { .. } => Type::Int,
+        }
+    }
+
+    fn payload_for_sender(&self) -> Option<&Type> {
+        match self {
+            Type::Sender(payload) => Some(payload),
+            Type::Int | Type::Receiver(_) | Type::Unit => None,
+        }
+    }
+
+    fn payload_for_receiver(&self) -> Option<&Type> {
+        match self {
+            Type::Receiver(payload) => Some(payload),
+            Type::Int | Type::Sender(_) | Type::Unit => None,
+        }
+    }
+
     fn is_linear(&self) -> bool {
-        matches!(self, Type::Sender | Type::Receiver)
+        matches!(self, Type::Sender(_) | Type::Receiver(_))
     }
 }
 
@@ -321,7 +402,9 @@ fn stmt_used_vars(stmt: &Stmt) -> BTreeSet<String> {
 fn stmt_defined_vars(stmt: &Stmt) -> BTreeSet<String> {
     match stmt {
         Stmt::Let { binding, .. } => [binding.var.clone()].into(),
-        Stmt::LetChannel { sender, receiver } => [sender.clone(), receiver.clone()].into(),
+        Stmt::LetChannel {
+            sender, receiver, ..
+        } => [sender.clone(), receiver.clone()].into(),
         Stmt::Assign { target, .. } => [target.clone()].into(),
         Stmt::Expr(_)
         | Stmt::Call { .. }
@@ -372,6 +455,7 @@ mod tests {
     fn accepts_well_typed_program() {
         let program = program(vec![
             Stmt::LetChannel {
+                payload: core::Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
             },
@@ -423,19 +507,79 @@ mod tests {
     }
 
     #[test]
+    fn accepts_channel_payload_send_and_recv() {
+        let program = program(vec![
+            Stmt::LetChannel {
+                payload: core::Type::int_sender(),
+                sender: "s".to_string(),
+                receiver: "r".to_string(),
+            },
+            Stmt::LetChannel {
+                payload: core::Type::Int,
+                sender: "inner_s".to_string(),
+                receiver: "inner_r".to_string(),
+            },
+            Stmt::Expr(Expr::MethodCall {
+                receiver: Box::new(var("s")),
+                method: MethodCall::Send(Box::new(var("inner_s"))),
+            }),
+            Stmt::Let {
+                binding: binding("received_s"),
+                value: Expr::MethodCall {
+                    receiver: Box::new(var("r")),
+                    method: MethodCall::Recv,
+                },
+            },
+            Stmt::Expr(Expr::MethodCall {
+                receiver: Box::new(var("received_s")),
+                method: MethodCall::Send(Box::new(int(1))),
+            }),
+        ]);
+
+        assert_eq!(check_program(&program), Ok(()));
+    }
+
+    #[test]
+    fn rejects_use_after_sending_linear_payload() {
+        let program = program(vec![
+            Stmt::LetChannel {
+                payload: core::Type::int_sender(),
+                sender: "s".to_string(),
+                receiver: "r".to_string(),
+            },
+            Stmt::LetChannel {
+                payload: core::Type::Int,
+                sender: "inner_s".to_string(),
+                receiver: "inner_r".to_string(),
+            },
+            Stmt::Expr(Expr::MethodCall {
+                receiver: Box::new(var("s")),
+                method: MethodCall::Send(Box::new(var("inner_s"))),
+            }),
+            Stmt::Expr(Expr::MethodCall {
+                receiver: Box::new(var("inner_s")),
+                method: MethodCall::Drop,
+            }),
+        ]);
+
+        assert_use_after_consume(check_program(&program), "inner_s");
+    }
+
+    #[test]
     fn rejects_undefined_variable_used_as_sender() {
         let program = program(vec![Stmt::Expr(Expr::MethodCall {
             receiver: Box::new(var("x")),
             method: MethodCall::Send(Box::new(int(1))),
         })]);
 
-        assert_type_mismatch(check_program(&program), Type::Sender, Type::Int);
+        assert_type_mismatch(check_program(&program), Type::int_sender(), Type::Int);
     }
 
     #[test]
     fn rejects_send_to_receiver() {
         let program = program(vec![
             Stmt::LetChannel {
+                payload: core::Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
             },
@@ -445,13 +589,18 @@ mod tests {
             }),
         ]);
 
-        assert_type_mismatch(check_program(&program), Type::Sender, Type::Receiver);
+        assert_type_mismatch(
+            check_program(&program),
+            Type::int_sender(),
+            Type::int_receiver(),
+        );
     }
 
     #[test]
     fn rejects_recv_from_sender() {
         let program = program(vec![
             Stmt::LetChannel {
+                payload: core::Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
             },
@@ -464,13 +613,18 @@ mod tests {
             },
         ]);
 
-        assert_type_mismatch(check_program(&program), Type::Receiver, Type::Sender);
+        assert_type_mismatch(
+            check_program(&program),
+            Type::int_receiver(),
+            Type::int_sender(),
+        );
     }
 
     #[test]
     fn rejects_non_int_send_payload() {
         let program = program(vec![
             Stmt::LetChannel {
+                payload: core::Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
             },
@@ -480,13 +634,14 @@ mod tests {
             }),
         ]);
 
-        assert_type_mismatch(check_program(&program), Type::Int, Type::Sender);
+        assert_type_mismatch(check_program(&program), Type::Int, Type::int_sender());
     }
 
     #[test]
     fn rejects_arithmetic_on_non_int_values() {
         let program = program(vec![
             Stmt::LetChannel {
+                payload: core::Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
             },
@@ -500,26 +655,28 @@ mod tests {
             },
         ]);
 
-        assert_type_mismatch(check_program(&program), Type::Int, Type::Sender);
+        assert_type_mismatch(check_program(&program), Type::Int, Type::int_sender());
     }
 
     #[test]
     fn rejects_assert_on_non_int_value() {
         let program = program(vec![
             Stmt::LetChannel {
+                payload: core::Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
             },
             Stmt::Assert(var("s")),
         ]);
 
-        assert_type_mismatch(check_program(&program), Type::Int, Type::Sender);
+        assert_type_mismatch(check_program(&program), Type::Int, Type::int_sender());
     }
 
     #[test]
     fn rejects_use_after_drop() {
         let program = program(vec![
             Stmt::LetChannel {
+                payload: core::Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
             },
@@ -540,6 +697,7 @@ mod tests {
     fn rejects_parent_use_after_spawn_consumes_linear_variable() {
         let program = program(vec![
             Stmt::LetChannel {
+                payload: core::Type::Int,
                 sender: "s".to_string(),
                 receiver: "r".to_string(),
             },
