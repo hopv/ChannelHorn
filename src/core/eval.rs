@@ -28,6 +28,11 @@ pub enum Value {
     Int(i32),
     Sender(Channel),
     Receiver(Channel),
+    Adt {
+        type_name: String,
+        variant: String,
+        fields: Vec<Value>,
+    },
 }
 
 impl Evaluator {
@@ -197,6 +202,44 @@ impl Evaluator {
                     _ => bail!("Variable is not a receiver: {:?}", receiver),
                 }
             }
+            Statement::Match { scrutinee, arms } => {
+                let scrutinee_value = env.get(scrutinee).ok_or_else(|| {
+                    anyhow::anyhow!("Undefined variable for match: {:?}", scrutinee)
+                })?;
+                match scrutinee_value.clone() {
+                    Value::Adt {
+                        type_name,
+                        variant,
+                        fields,
+                    } => {
+                        let arm = arms
+                            .iter()
+                            .find(|arm| arm.type_name == type_name && arm.variant == variant)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("No match arm for {}::{}", type_name, variant)
+                            })?;
+                        if arm.vars.len() != fields.len() {
+                            bail!(
+                                "Match arm {}::{} expects {} fields, got {}",
+                                type_name,
+                                variant,
+                                arm.vars.len(),
+                                fields.len()
+                            );
+                        }
+                        let mut var_map = HashMap::new();
+                        for (var, field) in arm.vars.iter().zip(fields) {
+                            let fresh_var = Self::fresh_var(&self.fresh_num);
+                            env.insert(fresh_var.clone(), field);
+                            var_map.insert(var.clone(), fresh_var);
+                        }
+                        let mut body = arm.body.clone();
+                        body.substitute_var(&var_map);
+                        Ok(Some(Statement::Call(body)))
+                    }
+                    _ => bail!("Variable is not an ADT value: {:?}", scrutinee),
+                }
+            }
             Statement::Dup { sender, var, body } => {
                 let sender_value = env.get(sender).ok_or_else(|| {
                     anyhow::anyhow!("Undefined variable for sender: {:?}", sender)
@@ -224,6 +267,21 @@ impl Expr {
                 Some(val) => Ok(val.clone()),
                 None => bail!("Undefined variable: {:?}", var),
             },
+            Expr::Ctor {
+                type_name,
+                variant,
+                args,
+            } => {
+                let fields = args
+                    .iter()
+                    .map(|arg| arg.step(env))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(Value::Adt {
+                    type_name: type_name.clone(),
+                    variant: variant.clone(),
+                    fields,
+                })
+            }
             Expr::Op(expr, op_kind, expr1) => {
                 let v1 = expr.step(env)?;
                 let v2 = expr1.step(env)?;
@@ -334,11 +392,42 @@ mod tests {
 
             main() = new<Sender<int>> s, r in make(s, r)
             make(s: Sender<Sender<int>>, r: Receiver<Sender<int>>) = new is, ir in send_inner(s, r, is, ir)
-            send_inner(s: Sender<Sender<int>>, r: Receiver<Sender<int>>, is: Sender, ir: Receiver) = send is to s; use_received_sender(r, ir)
-            use_received_sender(r: Receiver<Sender<int>>, ir: Receiver<int>) = let received_s = recv r in send_on_received(received_s, ir)
-            send_on_received(received_s: Sender, ir: Receiver<int>) = send 1 to received_s; read_int(ir)
-            read_int(ir: Receiver) = let x = recv ir in check_int(x)
-            check_int(x: int) = if x == 1 then unit() else fail()
+            send_inner(s: Sender<Sender<int>>, r: Receiver<Sender<int>>, is: Sender, ir: Receiver) = send is to s; use_received_sender(s, r, ir)
+            use_received_sender(s: Sender<Sender<int>>, r: Receiver<Sender<int>>, ir: Receiver<int>) = let received_s = recv r in send_on_received(received_s, s, r, ir)
+            send_on_received(received_s: Sender, s: Sender<Sender<int>>, r: Receiver<Sender<int>>, ir: Receiver<int>) = send 1 to received_s; read_int(received_s, s, r, ir)
+            read_int(received_s: Sender, s: Sender<Sender<int>>, r: Receiver<Sender<int>>, ir: Receiver) = let x = recv ir in check_int(x, received_s, s, r, ir)
+            check_int(x: int, received_s: Sender, s: Sender<Sender<int>>, r: Receiver<Sender<int>>, ir: Receiver<int>) = if x == 1 then unit(received_s, s, r, ir) else fail(received_s, s, r, ir)
+            unit(received_s: Sender, s: Sender<Sender<int>>, r: Receiver<Sender<int>>, ir: Receiver<int>) = ()
+            fail(received_s: Sender, s: Sender<Sender<int>>, r: Receiver<Sender<int>>, ir: Receiver<int>) = fail
+            "#,
+        )
+        .expect("program should parse");
+        let mut evaluator = Evaluator::new(program).expect("evaluator should initialize");
+
+        for _ in 0..100 {
+            if evaluator.is_done() {
+                return;
+            }
+            evaluator.step().expect("evaluation should not fail");
+        }
+
+        panic!("evaluation did not finish");
+    }
+
+    #[test]
+    fn can_match_adt_values() {
+        let program = parser::parse_program(
+            r#"
+            data Option = None | Some(int)
+
+            init = main()
+
+            main() = use(Option::Some(1))
+            use(opt: Option) = match opt {
+                Option::None() => fail(),
+                Option::Some(v) => check(v),
+            }
+            check(v: int) = if v == 1 then unit() else fail()
             unit() = ()
             fail() = fail
             "#,
@@ -346,7 +435,7 @@ mod tests {
         .expect("program should parse");
         let mut evaluator = Evaluator::new(program).expect("evaluator should initialize");
 
-        for _ in 0..100 {
+        for _ in 0..20 {
             if evaluator.is_done() {
                 return;
             }

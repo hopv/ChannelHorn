@@ -14,6 +14,11 @@ impl fmt::Display for Term {
         match self {
             Term::Var(v) => write!(f, "%{}", v),
             Term::Int(i) => write!(f, "{}", i),
+            Term::Ctor { name, args } if args.is_empty() => write!(f, "{}", name),
+            Term::Ctor { name, args } => {
+                let args_str: Vec<String> = args.iter().map(|arg| format!("{}", arg)).collect();
+                write!(f, "({} {})", name, args_str.join(" "))
+            }
             Term::Add(lhs, rhs) => write!(f, "(+ {} {})", lhs, rhs),
             Term::Sub(term, term1) => write!(f, "(- {} {})", term, term1),
             Term::Mul(term, term1) => write!(f, "(* {} {})", term, term1),
@@ -52,6 +57,7 @@ impl fmt::Display for super::Type {
         match self {
             super::Type::Int => write!(f, "Int"),
             super::Type::Bool => write!(f, "Bool"),
+            super::Type::Adt(name) => write!(f, "{}", name),
             super::Type::Lst(inner) => write!(f, "(Lst {})", inner),
             super::Type::Pair(first, second) => write!(f, "(Pair {} {})", first, second),
             super::Type::Func { args } => {
@@ -129,9 +135,49 @@ fn write_prologue(f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "{DATATYPES_PROLOGUE}\n\n",)
 }
 
+impl fmt::Display for super::Datatype {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let variants = self
+            .variants
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" ");
+        write!(
+            f,
+            "(declare-datatypes (({} 0))\n  (({})))",
+            self.name, variants
+        )
+    }
+}
+
+impl fmt::Display for super::DatatypeVariant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.fields.is_empty() {
+            return write!(f, "({})", self.name);
+        }
+        let fields = self
+            .fields
+            .iter()
+            .map(|(name, ty)| format!("({} {})", name, ty))
+            .collect::<Vec<_>>()
+            .join(" ");
+        write!(f, "({} {})", self.name, fields)
+    }
+}
+
 impl fmt::Display for super::CHC {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write_prologue(f)?;
+        if !self.datatypes.is_empty() {
+            let datatype_declarations = self
+                .datatypes
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            write!(f, "{}\n\n", datatype_declarations)?;
+        }
         write!(f, "\n\n")?;
         let fun_declarations_str: Vec<String> = self
             .fun_declarations

@@ -1,12 +1,13 @@
 use std::collections::BTreeSet;
 
-use crate::core::ast::Type;
+use crate::core::ast::{AdtDef, Type, TypeName, VariantName};
 
 pub type VarName = String;
 pub type FuncName = String;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
+    pub adts: Vec<AdtDef>,
     pub statements: Vec<Stmt>,
 }
 
@@ -46,7 +47,19 @@ pub enum Stmt {
         then_block: Block,
         else_block: Option<Block>,
     },
+    Match {
+        scrutinee: VarName,
+        arms: Vec<MatchArm>,
+    },
     Assert(Expr),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchArm {
+    pub type_name: TypeName,
+    pub variant: VariantName,
+    pub vars: Vec<VarName>,
+    pub block: Block,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +85,11 @@ pub enum AssignOp {
 pub enum Expr {
     Int(i32),
     Var(VarName),
+    Ctor {
+        type_name: TypeName,
+        variant: VariantName,
+        args: Vec<Expr>,
+    },
     MethodCall {
         receiver: Box<Expr>,
         method: MethodCall,
@@ -131,6 +149,19 @@ impl Stmt {
                     }
                 }
             }
+            Stmt::Match { scrutinee, arms } => {
+                vars.insert(scrutinee.clone());
+                for arm in arms {
+                    let mut arm_vars = BTreeSet::new();
+                    for stmt in &arm.block.statements {
+                        arm_vars.extend(stmt.free_vars());
+                    }
+                    for var in &arm.vars {
+                        arm_vars.remove(var);
+                    }
+                    vars.extend(arm_vars);
+                }
+            }
         }
         vars
     }
@@ -148,6 +179,11 @@ impl Expr {
             Expr::Int(_) => {}
             Expr::Var(var) => {
                 vars.insert(var.clone());
+            }
+            Expr::Ctor { args, .. } => {
+                for arg in args {
+                    arg.collect_free_vars(vars);
+                }
             }
             Expr::MethodCall { receiver, method } => {
                 receiver.collect_free_vars(vars);
@@ -212,6 +248,7 @@ mod tests {
     #[test]
     fn represents_channel_example() {
         let program = Program {
+            adts: vec![],
             statements: vec![
                 Stmt::LetChannel {
                     payload: Type::Int,

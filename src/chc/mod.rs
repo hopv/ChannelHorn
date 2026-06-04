@@ -24,6 +24,7 @@ impl PredicateAtom {
 pub enum Term {
     Var(VarName),
     Int(i32),
+    Ctor { name: String, args: Vec<Term> },
     Add(Box<Term>, Box<Term>),
     Sub(Box<Term>, Box<Term>),
     Mul(Box<Term>, Box<Term>),
@@ -50,6 +51,11 @@ impl Term {
             Term::Var(v) => {
                 if let Some(new_v) = var_map.get(v) {
                     *v = new_v.clone();
+                }
+            }
+            Term::Ctor { args, .. } => {
+                for arg in args {
+                    arg.substitute(var_map);
                 }
             }
             Term::Add(lhs, rhs)
@@ -101,6 +107,7 @@ impl Constraint {
 pub enum Type {
     Int,
     Bool,
+    Adt(String),
     Lst(Box<Type>),
     Pair(Box<Type>, Box<Type>),
     Func { args: Vec<Type> },
@@ -123,6 +130,7 @@ impl Type {
         match self {
             Type::Int => "Int".to_string(),
             Type::Bool => "Bool".to_string(),
+            Type::Adt(name) => name.clone(),
             Type::Lst(inner) => format!("Lst_{}", inner.predicate_suffix()),
             Type::Pair(first, second) => {
                 format!(
@@ -187,7 +195,20 @@ pub struct Setting {
 pub struct CHC {
     pub clauses: Vec<Clause>,
     pub fun_declarations: HashMap<PredicateName, Vec<Type>>,
+    pub datatypes: Vec<Datatype>,
     pub setting: Setting,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Datatype {
+    pub name: String,
+    pub variants: Vec<DatatypeVariant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatatypeVariant {
+    pub name: String,
+    pub fields: Vec<(String, Type)>,
 }
 
 pub static SORTED_PREDICATE: &str = "%Sorted";
@@ -199,6 +220,7 @@ impl CHC {
         CHC {
             clauses: vec![],
             fun_declarations: HashMap::new(),
+            datatypes: vec![],
             setting: setting.clone(),
         }
     }

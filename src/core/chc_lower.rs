@@ -3,8 +3,8 @@ use std::collections::HashMap;
 
 use crate::{
     chc::{
-        Body, CHC, Clause, Constraint, DisjunctiveBody, PredicateAtom, PredicateName, Setting,
-        Term, Type,
+        Body, CHC, Clause, Constraint, Datatype, DatatypeVariant, DisjunctiveBody, PredicateAtom,
+        PredicateName, Setting, Term, Type,
     },
     core::ast::{self},
 };
@@ -16,8 +16,10 @@ pub struct Ctx {
     var_declarations: HashMap<PredicateName, Type>,
     fun_declarations: HashMap<PredicateName, Vec<Type>>,
     type_env: HashMap<ast::VarName, ast::Type>,
+    adts: HashMap<ast::TypeName, ast::AdtDef>,
     primitive_payload_types: Vec<Type>,
     closed_payload_types: Vec<ast::Type>,
+    closed_value_types: Vec<ast::Type>,
     unused_num: usize,
     setting: Setting,
 }
@@ -146,9 +148,46 @@ impl Ctx {
                     args: vec![term],
                 });
             }
+            ast::Type::Adt(_) => {
+                let name = self.ensure_closed_adt_value(ty.clone())?;
+                body.predicates.push(PredicateAtom {
+                    name,
+                    args: vec![term],
+                });
+            }
             ast::Type::Int | ast::Type::Func { .. } | ast::Type::Receiver(_) => {}
         }
         Ok(())
+    }
+
+    fn ensure_closed_adt_value(&mut self, ty: ast::Type) -> Result<PredicateName> {
+        let name = closed_value_predicate_name(&ty);
+        if !self.closed_value_types.contains(&ty) {
+            let chc_ty = ty.lower_to_chc(&self.setting)?;
+            self.closed_value_types.push(ty.clone());
+            self.fun_declarations.insert(name.clone(), vec![chc_ty]);
+            if let ast::Type::Adt(type_name) = &ty {
+                let adt = self
+                    .adts
+                    .get(type_name)
+                    .ok_or_else(|| anyhow::anyhow!("unknown ADT type {}", type_name))?
+                    .clone();
+                for variant in &adt.variants {
+                    for field in &variant.fields {
+                        match field {
+                            ast::Type::Receiver(payload) if needs_closed_value(payload) => {
+                                self.ensure_closed_payload((**payload).clone())?;
+                            }
+                            ast::Type::Adt(_) => {
+                                self.ensure_closed_adt_value(field.clone())?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        Ok(name)
     }
 
     fn terminal_closed_body(&mut self) -> Result<Body> {
@@ -159,11 +198,116 @@ impl Ctx {
         }
         Ok(body)
     }
+
+    fn closed_clauses_for_payload(&mut self, payload: &ast::Type) -> Result<Vec<Clause>> {
+        let predicate_name = closed_predicate_name(payload);
+        let list_ty = closed_list_type(payload, &self.setting)?;
+        let payload_ty = payload.lower_to_chc(&self.setting)?;
+        let item_ty = if self.setting.no_timestamps {
+            payload_ty
+        } else {
+            Type::timestamped_value(payload_ty)
+        };
+        let value_term = if self.setting.no_timestamps {
+            Term::Var("p".to_string())
+        } else {
+            Term::Val(Term::Var("p".to_string()).into())
+        };
+        let mut recursive_body = Body {
+            predicates: vec![PredicateAtom {
+                name: predicate_name.clone(),
+                args: vec![Term::Var("tail".to_string())],
+            }],
+            constraints: vec![Constraint::Eq(
+                Term::Var("l".to_string()),
+                Term::Cons(
+                    Term::Var("p".to_string()).into(),
+                    Term::Var("tail".to_string()).into(),
+                ),
+            )],
+        };
+        self.add_closed_value_conditions(&mut recursive_body, value_term, payload)?;
+
+        Ok(vec![
+            Clause {
+                forall: vec![],
+                head: Some(PredicateAtom {
+                    name: predicate_name.clone(),
+                    args: vec![Term::Nil(list_ty.clone())],
+                }),
+                body: Body::default(),
+            },
+            Clause {
+                forall: vec![
+                    ("l".to_string(), list_ty.clone()),
+                    ("p".to_string(), item_ty),
+                    ("tail".to_string(), list_ty),
+                ],
+                head: Some(PredicateAtom {
+                    name: predicate_name,
+                    args: vec![Term::Var("l".to_string())],
+                }),
+                body: recursive_body,
+            },
+        ])
+    }
+
+    fn closed_clauses_for_adt_value(&mut self, ty: &ast::Type) -> Result<Vec<Clause>> {
+        let ast::Type::Adt(type_name) = ty else {
+            return Ok(vec![]);
+        };
+        let predicate_name = closed_value_predicate_name(ty);
+        let adt = self
+            .adts
+            .get(type_name)
+            .ok_or_else(|| anyhow::anyhow!("unknown ADT type {}", type_name))?
+            .clone();
+        let value_ty = ty.lower_to_chc(&self.setting)?;
+        let mut clauses = vec![];
+        for variant in &adt.variants {
+            let field_terms = variant
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(index, _)| Term::Var(format!("field{}", index)))
+                .collect::<Vec<_>>();
+            let mut body = Body {
+                predicates: vec![],
+                constraints: vec![Constraint::Eq(
+                    Term::Var("v".to_string()),
+                    Term::Ctor {
+                        name: adt_constructor_name(type_name, &variant.name),
+                        args: field_terms.clone(),
+                    },
+                )],
+            };
+            for (term, field_ty) in field_terms.iter().cloned().zip(&variant.fields) {
+                self.add_closed_value_conditions(&mut body, term, field_ty)?;
+            }
+            let mut forall = vec![("v".to_string(), value_ty.clone())];
+            for (index, field_ty) in variant.fields.iter().enumerate() {
+                forall.push((
+                    format!("field{}", index),
+                    field_ty.lower_to_chc(&self.setting)?,
+                ));
+            }
+            clauses.push(Clause {
+                forall,
+                head: Some(PredicateAtom {
+                    name: predicate_name.clone(),
+                    args: vec![Term::Var("v".to_string())],
+                }),
+                body,
+            });
+        }
+        Ok(clauses)
+    }
 }
 
 fn ast_type_suffix(ty: &ast::Type) -> String {
     match ty {
         ast::Type::Int => "Int".to_string(),
+        ast::Type::Adt(name) => format!("Adt_{}", name),
         ast::Type::Sender(payload) => format!("Sender_{}", ast_type_suffix(payload)),
         ast::Type::Receiver(payload) => format!("Receiver_{}", ast_type_suffix(payload)),
         ast::Type::Func { params } => {
@@ -181,10 +325,15 @@ fn closed_predicate_name(payload: &ast::Type) -> PredicateName {
     format!("{}${}", CLOSED_PREDICATE, ast_type_suffix(payload))
 }
 
+fn closed_value_predicate_name(ty: &ast::Type) -> PredicateName {
+    format!("{}Value${}", CLOSED_PREDICATE, ast_type_suffix(ty))
+}
+
 fn needs_closed_value(ty: &ast::Type) -> bool {
     match ty {
         ast::Type::Sender(_) => true,
         ast::Type::Receiver(payload) => needs_closed_value(payload),
+        ast::Type::Adt(_) => true,
         ast::Type::Int | ast::Type::Func { .. } => false,
     }
 }
@@ -196,79 +345,44 @@ fn closed_list_type(payload: &ast::Type, setting: &Setting) -> Result<Type> {
     ))
 }
 
-fn add_closed_value_to_body(
-    body: &mut Body,
-    term: Term,
-    ty: &ast::Type,
-    setting: &Setting,
-) -> Result<()> {
-    match ty {
-        ast::Type::Sender(_) => {
-            body.constraints
-                .push(Constraint::Eq(term, Term::Nil(ty.lower_to_chc(setting)?)));
-        }
-        ast::Type::Receiver(payload) if needs_closed_value(payload) => {
-            body.predicates.push(PredicateAtom {
-                name: closed_predicate_name(payload),
-                args: vec![term],
-            });
-        }
-        ast::Type::Int | ast::Type::Func { .. } | ast::Type::Receiver(_) => {}
-    }
-    Ok(())
+fn adt_type_name(name: &str) -> String {
+    format!("Adt${}", name)
 }
 
-fn closed_clauses_for_payload(setting: &Setting, payload: &ast::Type) -> Result<Vec<Clause>> {
-    let predicate_name = closed_predicate_name(payload);
-    let list_ty = closed_list_type(payload, setting)?;
-    let payload_ty = payload.lower_to_chc(setting)?;
-    let item_ty = if setting.no_timestamps {
-        payload_ty
-    } else {
-        Type::timestamped_value(payload_ty)
-    };
-    let value_term = if setting.no_timestamps {
-        Term::Var("p".to_string())
-    } else {
-        Term::Val(Term::Var("p".to_string()).into())
-    };
-    let mut recursive_body = Body {
-        predicates: vec![PredicateAtom {
-            name: predicate_name.clone(),
-            args: vec![Term::Var("tail".to_string())],
-        }],
-        constraints: vec![Constraint::Eq(
-            Term::Var("l".to_string()),
-            Term::Cons(
-                Term::Var("p".to_string()).into(),
-                Term::Var("tail".to_string()).into(),
-            ),
-        )],
-    };
-    add_closed_value_to_body(&mut recursive_body, value_term, payload, setting)?;
+fn adt_constructor_name(type_name: &str, variant: &str) -> String {
+    format!("Adt${}${}", type_name, variant)
+}
 
-    Ok(vec![
-        Clause {
-            forall: vec![],
-            head: Some(PredicateAtom {
-                name: predicate_name.clone(),
-                args: vec![Term::Nil(list_ty.clone())],
-            }),
-            body: Body::default(),
-        },
-        Clause {
-            forall: vec![
-                ("l".to_string(), list_ty.clone()),
-                ("p".to_string(), item_ty),
-                ("tail".to_string(), list_ty),
-            ],
-            head: Some(PredicateAtom {
-                name: predicate_name,
-                args: vec![Term::Var("l".to_string())],
-            }),
-            body: recursive_body,
-        },
-    ])
+fn adt_selector_name(type_name: &str, variant: &str, index: usize) -> String {
+    format!("Adt${}${}${}", type_name, variant, index)
+}
+
+fn lower_datatype_def(adt: &ast::AdtDef, setting: &Setting) -> Result<Datatype> {
+    let variants = adt
+        .variants
+        .iter()
+        .map(|variant| {
+            let fields = variant
+                .fields
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| {
+                    Ok((
+                        adt_selector_name(&adt.name, &variant.name, index),
+                        ty.lower_to_chc(setting)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(DatatypeVariant {
+                name: adt_constructor_name(&adt.name, &variant.name),
+                fields,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Datatype {
+        name: adt_type_name(&adt.name),
+        variants,
+    })
 }
 
 #[derive(Debug)]
@@ -281,6 +395,7 @@ impl ast::Type {
     fn lower_to_chc(&self, setting: &Setting) -> Result<Type> {
         Ok(match self {
             ast::Type::Int => Type::Int,
+            ast::Type::Adt(name) => Type::Adt(adt_type_name(name)),
             ast::Type::Sender(payload) | ast::Type::Receiver(payload) => {
                 Type::prophecy(setting.no_timestamps, payload.lower_to_chc(setting)?)
             }
@@ -303,6 +418,20 @@ impl ast::Expr {
                 let ast_ty = ctx.get_ast_type(var)?.clone();
                 let chc_ty = ast_ty.lower_to_chc(&ctx.setting)?;
                 ctx.insert_declared_var(var.clone(), chc_ty)?
+            }
+            ast::Expr::Ctor {
+                type_name,
+                variant,
+                args,
+            } => {
+                let args = args
+                    .iter()
+                    .map(|arg| arg.lower_to_chc(ctx))
+                    .collect::<Result<Vec<_>>>()?;
+                Term::Ctor {
+                    name: adt_constructor_name(type_name, variant),
+                    args,
+                }
             }
             ast::Expr::Op(expr1, op_kind, expr2) => {
                 let term1 = expr1.lower_to_chc(ctx)?;
@@ -556,6 +685,92 @@ impl ast::Statement {
                     .concat(body),
                 ]
             }
+            ast::Statement::Match { scrutinee, arms } => {
+                let scrutinee_ty = ctx.get_ast_type(scrutinee)?.clone();
+                let ast::Type::Adt(type_name) = &scrutinee_ty else {
+                    anyhow::bail!("Variable {} is not an ADT", scrutinee);
+                };
+                let adt = ctx
+                    .adts
+                    .get(type_name)
+                    .ok_or_else(|| anyhow::anyhow!("unknown ADT type {}", type_name))?
+                    .clone();
+                let scrutinee_chc_ty = scrutinee_ty.lower_to_chc(&ctx.setting)?;
+                let scrutinee_term =
+                    ctx.insert_declared_var(scrutinee, scrutinee_chc_ty.clone())?;
+                let base_type_env = ctx.type_env.clone();
+                let mut bodies = vec![];
+
+                for arm in arms {
+                    if &arm.type_name != type_name {
+                        anyhow::bail!(
+                            "match arm uses ADT {}, expected {}",
+                            arm.type_name,
+                            type_name
+                        );
+                    }
+                    let variant = adt
+                        .variants
+                        .iter()
+                        .find(|variant| variant.name == arm.variant)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("unknown variant {}::{}", type_name, arm.variant)
+                        })?;
+                    if variant.fields.len() != arm.vars.len() {
+                        anyhow::bail!(
+                            "variant {}::{} expects {} fields, got {}",
+                            type_name,
+                            arm.variant,
+                            variant.fields.len(),
+                            arm.vars.len()
+                        );
+                    }
+
+                    ctx.type_env = base_type_env.clone();
+                    ctx.type_env.remove(scrutinee);
+                    let arm_var_map = arm
+                        .vars
+                        .iter()
+                        .map(|var| (var.clone(), ctx.gen_new_var(var)))
+                        .collect::<HashMap<_, _>>();
+                    for (var, field_ty) in arm.vars.iter().zip(&variant.fields) {
+                        let fresh_var = arm_var_map
+                            .get(var)
+                            .expect("fresh variable should exist for arm binding");
+                        ctx.insert_to_type_env(fresh_var, field_ty.clone())?;
+                    }
+                    let mut arm_body = arm.body.clone();
+                    arm_body.substitute_var(&arm_var_map);
+                    let body = arm_body.lower_to_chc(ctx, lctx)?;
+                    let field_terms = arm
+                        .vars
+                        .iter()
+                        .zip(&variant.fields)
+                        .map(|(var, field_ty)| {
+                            let fresh_var = arm_var_map
+                                .get(var)
+                                .expect("fresh variable should exist for arm binding");
+                            ctx.insert_declared_var(fresh_var, field_ty.lower_to_chc(&ctx.setting)?)
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    bodies.push(
+                        Body {
+                            predicates: vec![],
+                            constraints: vec![Constraint::Eq(
+                                scrutinee_term.clone(),
+                                Term::Ctor {
+                                    name: adt_constructor_name(type_name, &arm.variant),
+                                    args: field_terms.clone(),
+                                },
+                            )],
+                        }
+                        .concat(body),
+                    );
+                }
+
+                ctx.type_env = base_type_env;
+                bodies
+            }
             ast::Statement::Dup { sender, var, body } => {
                 let sender_ty = ctx.get_ast_type(sender)?.clone();
                 let payload_ty = sender_ty
@@ -656,8 +871,18 @@ impl ast::Function {
 impl ast::Program {
     pub fn lower_to_chc(&self, setting: Setting) -> Result<CHC> {
         let mut chc = CHC::init_premitive(&setting);
+        chc.datatypes = self
+            .adts
+            .iter()
+            .map(|adt| lower_datatype_def(adt, &setting))
+            .collect::<Result<Vec<_>>>()?;
         let mut ctx = Ctx {
             fun_declarations: chc.fun_declarations.clone(),
+            adts: self
+                .adts
+                .iter()
+                .map(|adt| (adt.name.clone(), adt.clone()))
+                .collect(),
             setting,
             ..Default::default()
         };
@@ -719,7 +944,7 @@ impl ast::Program {
         )?;
 
         chc.clauses.push(Clause {
-            forall: ctx.var_declarations.into_iter().collect(),
+            forall: ctx.var_declarations.clone().into_iter().collect(),
             head: None,
             body: init_body,
         });
@@ -731,12 +956,17 @@ impl ast::Program {
 
         for payload in ctx.closed_payload_types.clone() {
             chc.clauses
-                .extend(closed_clauses_for_payload(&ctx.setting, &payload)?);
+                .extend(ctx.closed_clauses_for_payload(&payload)?);
+        }
+
+        for ty in ctx.closed_value_types.clone() {
+            chc.clauses.extend(ctx.closed_clauses_for_adt_value(&ty)?);
         }
 
         Ok(CHC {
             clauses: chc.clauses,
             fun_declarations: ctx.fun_declarations,
+            datatypes: chc.datatypes,
             setting: ctx.setting,
         })
     }
@@ -754,8 +984,8 @@ mod tests {
             init = main()
 
             main() = new<Sender<int>> s, r in proc(s, r)
-            proc(s: Sender<Sender<int>>, r: Receiver<Sender<int>>) = let s2 = dup s in fail_with(s2, r)
-            fail_with(s: Sender<Sender<int>>, r: Receiver<Sender<int>>) = fail
+            proc(s: Sender<Sender<int>>, r: Receiver<Sender<int>>) = let s2 = dup s in fail_with(s, s2, r)
+            fail_with(s1: Sender<Sender<int>>, s2: Sender<Sender<int>>, r: Receiver<Sender<int>>) = fail
             "#,
         )
         .expect("program should parse");
@@ -780,8 +1010,8 @@ mod tests {
             r#"
             init = main()
 
-            main() = new<Sender<int>> s, r in fail_with_receiver(r)
-            fail_with_receiver(r: Receiver<Sender<int>>) = fail
+            main() = new<Sender<int>> s, r in fail_with_receiver(s, r)
+            fail_with_receiver(s: Sender<Sender<int>>, r: Receiver<Sender<int>>) = fail
             "#,
         )
         .expect("program should parse");
@@ -816,5 +1046,61 @@ mod tests {
                     )
                 })
         );
+    }
+
+    #[test]
+    fn lowers_linear_adt_and_closed_value_predicate() {
+        let program = parser::parse_program(
+            r#"
+            data Box = Hold(Sender<int>)
+
+            init = main()
+
+            main() = new s, r in fail_with(Box::Hold(s), r)
+            fail_with(b: Box, r: Receiver<int>) = fail
+            "#,
+        )
+        .expect("program should parse");
+
+        let chc = program
+            .lower_to_chc(Setting {
+                no_timestamps: false,
+            })
+            .expect("program should lower");
+        let output = chc.to_string();
+
+        assert!(output.contains("(declare-datatypes ((Adt$Box 0))"));
+        assert!(output.contains("Adt$Box$Hold"));
+        assert!(chc.fun_declarations.contains_key("%ClosedValue$Adt_Box"));
+        assert!(
+            output.contains("(= %field0 (as nil (Lst (Pair Int Int))))"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn freshens_match_arm_bindings_with_the_same_name() {
+        let program = parser::parse_program(
+            r#"
+            data T = A(int) | B(Sender<int>)
+
+            init = main()
+
+            main() = new s, r in use(T::B(s), r)
+            use(t: T, r: Receiver<int>) = match t {
+                T::A(x) => done(r),
+                T::B(x) => done_with_sender(x, r),
+            }
+            done(r: Receiver<int>) = ()
+            done_with_sender(x: Sender<int>, r: Receiver<int>) = ()
+            "#,
+        )
+        .expect("program should parse");
+
+        program
+            .lower_to_chc(Setting {
+                no_timestamps: false,
+            })
+            .expect("program should lower without arm binding conflicts");
     }
 }

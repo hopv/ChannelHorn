@@ -1,13 +1,29 @@
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 
-use super::ast::{Expr, FuncCall, Function, OpKind, Program, Statement, Type};
+use super::ast::{
+    AdtDef, Expr, FuncCall, Function, MatchArm, OpKind, Program, Statement, Type, VariantDef,
+};
+use super::validate;
 
 peg::parser! {
     grammar channel_parser() for str {
-        pub rule program() -> (FuncCall, Vec<Function>)
-            = _ init:init_clause() funcs:(function_def() ++ _) _ { (init, funcs) }
+        pub rule program() -> (Vec<AdtDef>, FuncCall, Vec<Function>)
+            = _ adts:adt_def()* init:init_clause() funcs:(function_def() ++ _) _ { (adts, init, funcs) }
+
+        rule adt_def() -> AdtDef
+            = kw_data() name:ident() assign() variants:(variant_def() ++ bar()) {
+                AdtDef { name, variants }
+            }
+
+        rule variant_def() -> VariantDef
+            = name:ident() fields:(lparen() fields:(type_() ** comma())? rparen() { fields.unwrap_or_default() })? {
+                VariantDef {
+                    name,
+                    fields: fields.unwrap_or_default(),
+                }
+            }
 
         rule init_clause() -> FuncCall
             = kw_init() assign() call:func_call() { call }
@@ -30,6 +46,7 @@ peg::parser! {
         rule statement() -> Statement
             = spawn_stmt()
             / if_stmt()
+            / match_stmt()
             / new_stmt()
             / send_stmt()
             / let_recv_stmt()
@@ -46,6 +63,21 @@ peg::parser! {
         rule if_stmt() -> Statement
             = kw_if() cond:expression() kw_then() then_call:func_call() kw_else() else_call:func_call() {
                 Statement::If(cond, then_call, else_call)
+            }
+
+        rule match_stmt() -> Statement
+            = kw_match() scrutinee:ident() lbrace() arms:(match_arm() ++ comma()) comma()? rbrace() {
+                Statement::Match { scrutinee, arms }
+            }
+
+        rule match_arm() -> MatchArm
+            = type_name:ident() double_colon() variant:ident() lparen() vars:(ident() ** comma())? rparen() arrow() body:func_call() {
+                MatchArm {
+                    type_name,
+                    variant,
+                    vars: vars.unwrap_or_default(),
+                    body,
+                }
             }
 
         rule new_stmt() -> Statement
@@ -123,8 +155,18 @@ peg::parser! {
 
         rule term() -> Expr
             = number()
+            / constructor()
             / variable()
             / lparen() expr:expression() rparen() { expr }
+
+        rule constructor() -> Expr
+            = type_name:ident() double_colon() variant:ident() lparen() args:(expression() ** comma())? rparen() {
+                Expr::Ctor {
+                    type_name,
+                    variant,
+                    args: args.unwrap_or_default(),
+                }
+            }
 
         rule equality_op() -> OpKind
             = eqeq() { OpKind::Eq }
@@ -156,6 +198,7 @@ peg::parser! {
             = sender_type()
             / receiver_type()
             / int_type()
+            / adt_type()
 
         rule sender_type() -> Type
             = quiet!{ "Sender" }
@@ -176,6 +219,9 @@ peg::parser! {
             = quiet!{ "int" }
               !ident_char() _() { Type::Int }
 
+        rule adt_type() -> Type
+            = name:ident() { Type::Adt(name) }
+
         rule ident() -> String
             = s:$((ident_start()) (ident_char())*) _() { s.to_string() }
 
@@ -187,6 +233,12 @@ peg::parser! {
 
         rule kw_init()
             = quiet!{ "init" } !ident_char() _()
+
+        rule kw_data()
+            = quiet!{ "data" } !ident_char() _()
+
+        rule kw_match()
+            = quiet!{ "match" } !ident_char() _()
 
         rule kw_spawn()
             = quiet!{ "spawn" } !ident_char() _()
@@ -230,11 +282,26 @@ peg::parser! {
         rule rparen()
             = quiet!{ ")" } _()
 
+        rule lbrace()
+            = quiet!{ "{" } _()
+
+        rule rbrace()
+            = quiet!{ "}" } _()
+
         rule comma()
             = quiet!{ "," } _()
 
+        rule bar()
+            = quiet!{ "|" } _()
+
         rule colon()
             = quiet!{ ":" } _()
+
+        rule double_colon()
+            = quiet!{ "::" } _()
+
+        rule arrow()
+            = quiet!{ "=>" } _()
 
         rule assign()
             = quiet!{ "=" } _()
@@ -286,16 +353,15 @@ peg::parser! {
 }
 
 pub fn parse_program(input: &str) -> Result<Program> {
-    let (init, functions) =
+    let (adts, init, functions) =
         channel_parser::program(input).map_err(|e| anyhow!("parse error: {}", e))?;
+    validate::validate_program_parts(&adts, &init, &functions)?;
     let mut map = HashMap::new();
     for func in functions {
-        if map.contains_key(&func.name) {
-            bail!("function '{}' is defined multiple times", func.name);
-        }
         map.insert(func.name.clone(), func);
     }
     Ok(Program {
+        adts,
         functions: map,
         init,
     })
@@ -334,8 +400,9 @@ mod tests {
     fn parses_parameterized_channel_types() {
         let program = parse_program(
             r#"
-            init = main()
+            init = entry()
 
+            entry() = ()
             main(s: Sender<int>, r: Receiver<int>) = ()
             "#,
         )
@@ -358,8 +425,9 @@ mod tests {
     fn parses_bare_channel_types_as_int_channels() {
         let program = parse_program(
             r#"
-            init = main()
+            init = entry()
 
+            entry() = ()
             main(s: Sender, r: Receiver) = ()
             "#,
         )
@@ -406,5 +474,70 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn parses_adt_defs_constructors_and_match() {
+        let program = parse_program(
+            r#"
+            data Option = None | Some(int)
+
+            init = main()
+
+            main() = use(Option::Some(1))
+            use(opt: Option) = match opt {
+                Option::None() => fail(),
+                Option::Some(v) => done(v),
+            }
+            done(v: int) = ()
+            fail() = fail
+            "#,
+        )
+        .expect("ADT program should parse");
+
+        assert_eq!(program.adts.len(), 1);
+        assert_eq!(program.adts[0].name, "Option");
+        assert_eq!(program.adts[0].variants[1].fields, vec![Type::Int]);
+
+        let main = program
+            .functions
+            .get("main")
+            .expect("main function should exist");
+        assert_eq!(
+            main.body,
+            Statement::Call(FuncCall {
+                name: "use".to_string(),
+                args: vec![Expr::Ctor {
+                    type_name: "Option".to_string(),
+                    variant: "Some".to_string(),
+                    args: vec![Expr::Num(1)],
+                }],
+            })
+        );
+
+        let use_func = program
+            .functions
+            .get("use")
+            .expect("use function should exist");
+        assert!(matches!(use_func.body, Statement::Match { .. }));
+    }
+
+    #[test]
+    fn rejects_non_exhaustive_match() {
+        let err = parse_program(
+            r#"
+            data Option = None | Some(int)
+
+            init = main()
+
+            main(opt: Option) = match opt {
+                Option::None() => done(),
+            }
+            done() = ()
+            "#,
+        )
+        .expect_err("non-exhaustive match should be rejected");
+
+        assert!(err.to_string().contains("missing arm"));
     }
 }

@@ -70,13 +70,15 @@ impl Env {
 
 #[derive(Debug)]
 struct Ctx {
+    adts: Vec<core::AdtDef>,
     functions: HashMap<core::FuncName, core::Function>,
     next_label: usize,
 }
 
 impl Ctx {
-    fn new() -> Self {
+    fn with_adts(adts: Vec<core::AdtDef>) -> Self {
         let mut ctx = Self {
+            adts,
             functions: HashMap::new(),
             next_label: 0,
         };
@@ -99,6 +101,12 @@ impl Ctx {
         label
     }
 
+    fn fresh_var(&mut self) -> VarName {
+        let var = format!("__sugar_var_{}", self.next_label);
+        self.next_label += 1;
+        var
+    }
+
     fn insert_function(&mut self, function: core::Function) {
         self.functions.insert(function.name.clone(), function);
     }
@@ -106,7 +114,7 @@ impl Ctx {
 
 pub fn desugar_program(program: &ast::Program) -> Result<core::Program> {
     let liveness = Liveness::new(&program.statements);
-    let mut ctx = Ctx::new();
+    let mut ctx = Ctx::with_adts(program.adts.clone());
     let mut env = Env::new();
     for var in liveness.live_before(0) {
         env.insert(var.clone(), core::Type::Int);
@@ -121,6 +129,7 @@ pub fn desugar_program(program: &ast::Program) -> Result<core::Program> {
     )?;
 
     Ok(core::Program {
+        adts: program.adts.clone(),
         functions: ctx.functions,
         init: core::FuncCall {
             name: ENTRY_FUNC.to_string(),
@@ -209,12 +218,11 @@ fn desugar_stmt(
                 })
             }
             _ => {
+                let value_ty = infer_expr_type(value, &env, ctx)?;
                 let value = lower_expr(value)?;
                 let mut next_env = env.clone();
-                next_env.insert(
-                    binding.var.clone(),
-                    infer_expr_type(value_expr(stmt)?, &env)?,
-                );
+                next_env.insert(binding.var.clone(), value_ty);
+                remove_linear_free_vars(&mut next_env, value_expr(stmt)?, &env);
                 let overrides = [(binding.var.clone(), value)];
                 let call =
                     continuation_call(ctx, statements, index, next_env, liveness, &overrides)?;
@@ -239,14 +247,12 @@ fn desugar_stmt(
                 MethodCall::Send(value) => {
                     let sender = expect_var(receiver)?;
                     let payload = ensure_sender_payload(&env, sender)?;
-                    let value_ty = infer_expr_type(value, &env)?;
+                    let value_ty = infer_expr_type(value, &env, ctx)?;
                     ensure_type_matches(payload, &value_ty)?;
                     let value_expr = lower_expr(value)?;
                     let mut next_env = env.clone();
                     if value_ty.is_linear() {
-                        for var in value.free_vars() {
-                            next_env.remove(&var);
-                        }
+                        remove_linear_free_vars(&mut next_env, value, &env);
                     }
                     let body = continuation_call(ctx, statements, index, next_env, liveness, &[])?;
                     Ok(core::Statement::Send {
@@ -284,18 +290,47 @@ fn desugar_stmt(
             },
             _ => bail!("expression statement must be a method call or function call"),
         },
+        Stmt::Match { scrutinee, arms } => {
+            let type_name = match env.get(scrutinee) {
+                Some(core::Type::Adt(type_name)) => type_name.clone(),
+                Some(ty) => bail!("expected variable {scrutinee} to be an ADT, got {ty:?}"),
+                None => bail!("undefined variable {scrutinee}"),
+            };
+            let mut continuation_env = env.clone();
+            continuation_env.remove(scrutinee);
+            let join_call =
+                continuation_after_if(ctx, statements, index, continuation_env.clone(), liveness)?;
+            let mut core_arms = vec![];
+            for arm in arms {
+                if arm.type_name != type_name {
+                    bail!(
+                        "match arm uses ADT '{}', expected '{}'",
+                        arm.type_name,
+                        type_name
+                    );
+                }
+                let variant = find_variant(ctx, &arm.type_name, &arm.variant)?;
+                let mut arm_env = continuation_env.clone();
+                for (var, field_ty) in arm.vars.iter().zip(&variant.fields) {
+                    arm_env.insert(var.clone(), field_ty.clone());
+                }
+                core_arms.push(core::MatchArm {
+                    type_name: arm.type_name.clone(),
+                    variant: arm.variant.clone(),
+                    vars: arm.vars.clone(),
+                    body: emit_branch_call(ctx, &arm.block, join_call.as_ref(), arm_env)?,
+                });
+            }
+            Ok(core::Statement::Match {
+                scrutinee: scrutinee.clone(),
+                arms: core_arms,
+            })
+        }
         Stmt::Call { name, args } => Ok(core::Statement::Call(core::FuncCall {
             name: name.clone(),
             args: args.iter().map(lower_expr).collect::<Result<Vec<_>>>()?,
         })),
-        Stmt::Assert(cond) => {
-            let then_call = continuation_call(ctx, statements, index, env.clone(), liveness, &[])?;
-            Ok(core::Statement::If(
-                lower_expr(cond)?,
-                then_call,
-                terminal_fail_call(ctx, &env),
-            ))
-        }
+        Stmt::Assert(cond) => desugar_assert(ctx, statements, index, env, liveness, cond),
         Stmt::Spawn(block) => {
             let block_liveness = Liveness::new(&block.statements);
             let block_live = block_liveness.live_before(0);
@@ -402,6 +437,250 @@ fn continuation_after_if(
         liveness,
         &[],
     )?))
+}
+
+#[derive(Debug, Clone)]
+struct AdtAssert {
+    scrutinee: VarName,
+    type_name: String,
+    variant: String,
+    args: Vec<Expr>,
+    op: BinaryOp,
+}
+
+fn desugar_assert(
+    ctx: &mut Ctx,
+    statements: &[Stmt],
+    index: usize,
+    env: Env,
+    liveness: &Liveness,
+    cond: &Expr,
+) -> Result<core::Statement> {
+    if let Some(assertion) = adt_assert(cond, &env, ctx)? {
+        return desugar_adt_assert(ctx, statements, index, env, liveness, assertion);
+    }
+
+    let then_call = continuation_call(ctx, statements, index, env.clone(), liveness, &[])?;
+    Ok(core::Statement::If(
+        lower_expr(cond)?,
+        then_call,
+        terminal_fail_call(ctx, &env),
+    ))
+}
+
+fn adt_assert(cond: &Expr, env: &Env, ctx: &Ctx) -> Result<Option<AdtAssert>> {
+    let Expr::BinaryOp { lhs, op, rhs } = cond else {
+        return Ok(None);
+    };
+    if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+        return Ok(None);
+    }
+
+    let (scrutinee, ctor) = match (&**lhs, &**rhs) {
+        (Expr::Var(var), ctor @ Expr::Ctor { .. }) => (var, ctor),
+        (ctor @ Expr::Ctor { .. }, Expr::Var(var)) => (var, ctor),
+        _ => return Ok(None),
+    };
+    let Expr::Ctor {
+        type_name,
+        variant,
+        args,
+    } = ctor
+    else {
+        return Ok(None);
+    };
+    match env.get(scrutinee) {
+        Some(core::Type::Adt(actual)) if actual == type_name => {}
+        Some(ty) => bail!("expected variable {scrutinee} to be {type_name}, got {ty:?}"),
+        None => bail!("undefined variable {scrutinee}"),
+    }
+    let adt = find_adt(ctx, type_name)?;
+    for variant_def in &adt.variants {
+        for field in &variant_def.fields {
+            if field != &core::Type::Int {
+                bail!(
+                    "ADT equality is only supported when all fields are int, but '{}::{}' has field {:?}",
+                    type_name,
+                    variant_def.name,
+                    field
+                );
+            }
+        }
+    }
+    let variant_def = find_variant(ctx, type_name, variant)?;
+    if args.len() != variant_def.fields.len() {
+        bail!(
+            "variant '{}::{}' expects {} fields, got {}",
+            type_name,
+            variant,
+            variant_def.fields.len(),
+            args.len()
+        );
+    }
+    Ok(Some(AdtAssert {
+        scrutinee: scrutinee.clone(),
+        type_name: type_name.clone(),
+        variant: variant.clone(),
+        args: args.clone(),
+        op: *op,
+    }))
+}
+
+fn desugar_adt_assert(
+    ctx: &mut Ctx,
+    statements: &[Stmt],
+    index: usize,
+    env: Env,
+    liveness: &Liveness,
+    assertion: AdtAssert,
+) -> Result<core::Statement> {
+    let mut continuation_env = env.clone();
+    continuation_env.remove(&assertion.scrutinee);
+    let success_call = continuation_call(
+        ctx,
+        statements,
+        index,
+        continuation_env.clone(),
+        liveness,
+        &[],
+    )?;
+    let failure_call = terminal_fail_call(ctx, &continuation_env);
+    let adt = find_adt(ctx, &assertion.type_name)?.clone();
+    let mut arms = vec![];
+
+    for variant in adt.variants {
+        let vars = (0..variant.fields.len())
+            .map(|_| ctx.fresh_var())
+            .collect::<Vec<_>>();
+        let mut arm_env = continuation_env.clone();
+        for (var, field_ty) in vars.iter().zip(&variant.fields) {
+            arm_env.insert(var.clone(), field_ty.clone());
+        }
+
+        let body = if variant.name == assertion.variant {
+            let conds = vars
+                .iter()
+                .zip(&assertion.args)
+                .map(|(var, expected)| {
+                    lower_expr(&Expr::BinaryOp {
+                        lhs: Box::new(Expr::Var(var.clone())),
+                        op: match assertion.op {
+                            BinaryOp::Eq => BinaryOp::Eq,
+                            BinaryOp::Ne => BinaryOp::Ne,
+                            _ => unreachable!("only equality assertions are classified"),
+                        },
+                        rhs: Box::new(expected.clone()),
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            match assertion.op {
+                BinaryOp::Eq => build_all_conditions_call(
+                    ctx,
+                    conds,
+                    success_call.clone(),
+                    failure_call.clone(),
+                    &arm_env,
+                )?,
+                BinaryOp::Ne => build_any_condition_call(
+                    ctx,
+                    conds,
+                    success_call.clone(),
+                    failure_call.clone(),
+                    &arm_env,
+                )?,
+                _ => unreachable!("only equality assertions are classified"),
+            }
+        } else {
+            match assertion.op {
+                BinaryOp::Eq => failure_call.clone(),
+                BinaryOp::Ne => success_call.clone(),
+                _ => unreachable!("only equality assertions are classified"),
+            }
+        };
+
+        arms.push(core::MatchArm {
+            type_name: assertion.type_name.clone(),
+            variant: variant.name,
+            vars,
+            body,
+        });
+    }
+
+    Ok(core::Statement::Match {
+        scrutinee: assertion.scrutinee,
+        arms,
+    })
+}
+
+fn build_all_conditions_call(
+    ctx: &mut Ctx,
+    conds: Vec<core::Expr>,
+    all_true_call: core::FuncCall,
+    any_false_call: core::FuncCall,
+    env: &Env,
+) -> Result<core::FuncCall> {
+    build_condition_chain_call(ctx, conds, all_true_call, any_false_call, env, true)
+}
+
+fn build_any_condition_call(
+    ctx: &mut Ctx,
+    conds: Vec<core::Expr>,
+    any_true_call: core::FuncCall,
+    all_false_call: core::FuncCall,
+    env: &Env,
+) -> Result<core::FuncCall> {
+    build_condition_chain_call(ctx, conds, any_true_call, all_false_call, env, false)
+}
+
+fn build_condition_chain_call(
+    ctx: &mut Ctx,
+    conds: Vec<core::Expr>,
+    true_call: core::FuncCall,
+    false_call: core::FuncCall,
+    env: &Env,
+    require_all: bool,
+) -> Result<core::FuncCall> {
+    if conds.is_empty() {
+        return Ok(if require_all { true_call } else { false_call });
+    }
+
+    let live = conds
+        .iter()
+        .flat_map(core::Expr::free_vars)
+        .chain(true_call.free_vars())
+        .chain(false_call.free_vars())
+        .collect::<BTreeSet<_>>();
+    let params = env.params_for(&live);
+    let call_args = params
+        .iter()
+        .map(|(var, _)| core::Expr::Var(var.clone()))
+        .collect::<Vec<_>>();
+    let mut next_call = if require_all {
+        true_call.clone()
+    } else {
+        false_call.clone()
+    };
+
+    for cond in conds.into_iter().rev() {
+        let name = ctx.fresh_label();
+        let call = core::FuncCall {
+            name: name.clone(),
+            args: call_args.clone(),
+        };
+        let body = if require_all {
+            core::Statement::If(cond, next_call, false_call.clone())
+        } else {
+            core::Statement::If(cond, true_call.clone(), next_call)
+        };
+        ctx.insert_function(core::Function {
+            name,
+            params: params.clone(),
+            body,
+        });
+        next_call = call;
+    }
+
+    Ok(next_call)
 }
 
 fn emit_branch_call(
@@ -603,12 +882,60 @@ fn ensure_linear<'a>(env: &'a Env, var: &str) -> Result<&'a core::Type> {
     }
 }
 
-fn infer_expr_type(expr: &Expr, env: &Env) -> Result<core::Type> {
+fn infer_expr_type(expr: &Expr, env: &Env, ctx: &Ctx) -> Result<core::Type> {
     match expr {
         Expr::Int(_) => Ok(core::Type::Int),
         Expr::Var(var) => Ok(env.get(var).cloned().unwrap_or(core::Type::Int)),
+        Expr::Ctor {
+            type_name,
+            variant,
+            args,
+        } => {
+            let variant_def = find_variant(ctx, type_name, variant)?;
+            if args.len() != variant_def.fields.len() {
+                bail!(
+                    "variant '{}::{}' expects {} fields, got {}",
+                    type_name,
+                    variant,
+                    variant_def.fields.len(),
+                    args.len()
+                );
+            }
+            for (arg, expected_ty) in args.iter().zip(&variant_def.fields) {
+                let actual_ty = infer_expr_type(arg, env, ctx)?;
+                ensure_type_matches(expected_ty, &actual_ty)?;
+            }
+            Ok(core::Type::Adt(type_name.clone()))
+        }
         Expr::BinaryOp { .. } => Ok(core::Type::Int),
         Expr::MethodCall { .. } => bail!("cannot infer this expression type yet"),
+    }
+}
+
+fn find_adt<'a>(ctx: &'a Ctx, name: &str) -> Result<&'a core::AdtDef> {
+    ctx.adts
+        .iter()
+        .find(|adt| adt.name == name)
+        .ok_or_else(|| anyhow::anyhow!("unknown ADT type '{name}'"))
+}
+
+fn find_variant<'a>(ctx: &'a Ctx, type_name: &str, variant: &str) -> Result<&'a core::VariantDef> {
+    let adt = find_adt(ctx, type_name)?;
+    adt.variants
+        .iter()
+        .find(|variant_def| variant_def.name == variant)
+        .ok_or_else(|| anyhow::anyhow!("unknown variant '{}::{}'", type_name, variant))
+}
+
+fn remove_linear_free_vars(target_env: &mut Env, expr: &Expr, source_env: &Env) {
+    for var in expr.free_vars() {
+        if source_env
+            .get(&var)
+            .map(core::Type::is_linear)
+            .unwrap_or(false)
+        {
+            target_env.remove(&var);
+        }
     }
 }
 
@@ -638,6 +965,15 @@ fn lower_expr(expr: &Expr) -> Result<core::Expr> {
     Ok(match expr {
         Expr::Int(n) => core::Expr::Num(*n),
         Expr::Var(var) => core::Expr::Var(var.clone()),
+        Expr::Ctor {
+            type_name,
+            variant,
+            args,
+        } => core::Expr::Ctor {
+            type_name: type_name.clone(),
+            variant: variant.clone(),
+            args: args.iter().map(lower_expr).collect::<Result<Vec<_>>>()?,
+        },
         Expr::BinaryOp { lhs, op, rhs } => core::Expr::Op(
             Box::new(lower_expr(lhs)?),
             lower_binary_op(*op),
@@ -720,6 +1056,17 @@ fn used_vars(stmt: &Stmt) -> BTreeSet<VarName> {
             }
             vars
         }
+        Stmt::Match { scrutinee, arms } => {
+            let mut vars = BTreeSet::from([scrutinee.clone()]);
+            for arm in arms {
+                let mut arm_vars = block_free_vars(&arm.block);
+                for var in &arm.vars {
+                    arm_vars.remove(var);
+                }
+                vars.extend(arm_vars);
+            }
+            vars
+        }
     }
 }
 
@@ -735,6 +1082,7 @@ fn defined_vars(stmt: &Stmt) -> BTreeSet<VarName> {
         | Stmt::Spawn(_)
         | Stmt::While { .. }
         | Stmt::If { .. }
+        | Stmt::Match { .. }
         | Stmt::Assert(_) => BTreeSet::new(),
     }
 }
@@ -780,9 +1128,27 @@ mod tests {
         env
     }
 
+    fn box_adt() -> core::AdtDef {
+        core::AdtDef {
+            name: "Box".to_string(),
+            variants: vec![core::VariantDef {
+                name: "Hold".to_string(),
+                fields: vec![core::Type::int_sender()],
+            }],
+        }
+    }
+
     fn convert_first_stmt(statements: Vec<Stmt>, env: Env) -> (core::Statement, Ctx) {
+        convert_first_stmt_with_adts(statements, env, vec![])
+    }
+
+    fn convert_first_stmt_with_adts(
+        statements: Vec<Stmt>,
+        env: Env,
+        adts: Vec<core::AdtDef>,
+    ) -> (core::Statement, Ctx) {
         let liveness = Liveness::new(&statements);
-        let mut ctx = Ctx::new();
+        let mut ctx = Ctx::with_adts(adts);
         let stmt = desugar_stmt(&mut ctx, &statements, 0, env, &liveness)
             .expect("statement desugaring should succeed");
         (stmt, ctx)
@@ -846,6 +1212,32 @@ mod tests {
             "#,
         )
         .expect("sugar program should parse");
+        check::check_program(&sugar_program).expect("sugar program should type check");
+        let core_program = desugar_program(&sugar_program).expect("sugar program should desugar");
+        let mut evaluator = Evaluator::new(core_program).expect("evaluator should initialize");
+
+        for _ in 0..100 {
+            if evaluator.is_done() {
+                return;
+            }
+            evaluator.step().expect("evaluation should not fail");
+        }
+
+        panic!("evaluation did not finish");
+    }
+
+    #[test]
+    fn adt_equality_assertion_runs_after_desugaring() {
+        let sugar_program = parser::parse_program(
+            r#"
+            data Option = Some(int) | None
+            let s, r = channel<Option>();
+            s.send(Option::Some(42));
+            let x = r.recv();
+            assert!(x == Option::Some(42));
+            "#,
+        )
+        .expect("ADT equality program should parse");
         check::check_program(&sugar_program).expect("sugar program should type check");
         let core_program = desugar_program(&sugar_program).expect("sugar program should desugar");
         let mut evaluator = Evaluator::new(core_program).expect("evaluator should initialize");
@@ -1070,6 +1462,47 @@ mod tests {
             }
             other => panic!("expected send statement, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn let_adt_constructor_moves_linear_fields_to_the_constructed_value() {
+        let (stmt, ctx) = convert_first_stmt_with_adts(
+            vec![
+                Stmt::Let {
+                    binding: binding("b"),
+                    value: Expr::Ctor {
+                        type_name: "Box".to_string(),
+                        variant: "Hold".to_string(),
+                        args: vec![var("s")],
+                    },
+                },
+                Stmt::Expr(Expr::MethodCall {
+                    receiver: Box::new(var("b")),
+                    method: MethodCall::Drop,
+                }),
+            ],
+            env(&[("s", core::Type::int_sender())]),
+            vec![box_adt()],
+        );
+
+        let call = match stmt {
+            core::Statement::Call(call) => call,
+            other => panic!("expected constructor let to become continuation call, got {other:?}"),
+        };
+        assert_call(
+            &call,
+            vec![core::Expr::Ctor {
+                type_name: "Box".to_string(),
+                variant: "Hold".to_string(),
+                args: vec![core_var("s")],
+            }],
+        );
+
+        let continuation = generated_function(&ctx, &call.name);
+        assert_eq!(
+            continuation.params,
+            vec![("b".to_string(), core::Type::Adt("Box".to_string()))]
+        );
     }
 
     #[test]
@@ -1345,6 +1778,46 @@ mod tests {
     }
 
     #[test]
+    fn match_statement_becomes_core_match() {
+        let (stmt, ctx) = convert_first_stmt_with_adts(
+            vec![Stmt::Match {
+                scrutinee: "b".to_string(),
+                arms: vec![ast::MatchArm {
+                    type_name: "Box".to_string(),
+                    variant: "Hold".to_string(),
+                    vars: vec!["s".to_string()],
+                    block: ast::Block {
+                        statements: vec![Stmt::Expr(Expr::MethodCall {
+                            receiver: Box::new(var("s")),
+                            method: MethodCall::Drop,
+                        })],
+                    },
+                }],
+            }],
+            env(&[("b", core::Type::Adt("Box".to_string()))]),
+            vec![box_adt()],
+        );
+
+        let arms = match stmt {
+            core::Statement::Match { scrutinee, arms } => {
+                assert_eq!(scrutinee, "b");
+                arms
+            }
+            other => panic!("expected core match statement, got {other:?}"),
+        };
+        assert_eq!(arms.len(), 1);
+        assert_eq!(arms[0].type_name, "Box");
+        assert_eq!(arms[0].variant, "Hold");
+        assert_eq!(arms[0].vars, vec!["s".to_string()]);
+
+        let arm_function = generated_function(&ctx, &arms[0].body.name);
+        assert_eq!(
+            arm_function.params,
+            vec![("s".to_string(), core::Type::int_sender())]
+        );
+    }
+
+    #[test]
     fn while_statement_becomes_loop_call() {
         let (stmt, ctx) = convert_first_stmt(
             vec![
@@ -1398,6 +1871,7 @@ mod tests {
     #[test]
     fn undefined_variables_become_core_init_arguments() {
         let program = ast::Program {
+            adts: vec![],
             statements: vec![Stmt::Assert(var("x"))],
         };
 
@@ -1428,6 +1902,7 @@ mod tests {
     #[test]
     fn assignment_defines_int_variable_without_core_init_argument() {
         let program = ast::Program {
+            adts: vec![],
             statements: vec![
                 Stmt::Assign {
                     target: "x".to_string(),

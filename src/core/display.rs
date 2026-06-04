@@ -1,9 +1,18 @@
 use std::fmt;
 
-use super::ast::{Expr, FuncCall, Function, OpKind, Program, Statement, Type};
+use super::ast::{
+    AdtDef, Expr, FuncCall, Function, MatchArm, OpKind, Program, Statement, Type, VariantDef,
+};
 
 impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for adt in &self.adts {
+            writeln!(f, "{}", adt)?;
+        }
+        if !self.adts.is_empty() {
+            writeln!(f)?;
+        }
+
         writeln!(f, "init = {}", self.init)?;
 
         let mut names: Vec<&str> = self.functions.keys().map(String::as_str).collect();
@@ -32,6 +41,33 @@ impl fmt::Display for Program {
     }
 }
 
+impl fmt::Display for AdtDef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let variants = self
+            .variants
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        write!(f, "data {} = {}", self.name, variants)
+    }
+}
+
+impl fmt::Display for VariantDef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.fields.is_empty() {
+            return write!(f, "{}", self.name);
+        }
+        let fields = self
+            .fields
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(f, "{}({})", self.name, fields)
+    }
+}
+
 impl fmt::Display for Function {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let params = self
@@ -48,6 +84,7 @@ impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Type::Int => write!(f, "int"),
+            Type::Adt(name) => write!(f, "{}", name),
             Type::Sender(payload) if **payload == Type::Int => write!(f, "Sender"),
             Type::Sender(payload) => write!(f, "Sender<{}>", payload),
             Type::Receiver(payload) if **payload == Type::Int => write!(f, "Receiver"),
@@ -96,10 +133,29 @@ impl fmt::Display for Statement {
                 var,
                 body,
             } => write!(f, "let {} = recv {} in {}", var, receiver, body),
+            Statement::Match { scrutinee, arms } => {
+                let arms = arms
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                write!(f, "match {} {{ {} }}", scrutinee, arms)
+            }
             Statement::Dup { sender, var, body } => {
                 write!(f, "let {} = dup {} in {}", var, sender, body)
             }
         }
+    }
+}
+
+impl fmt::Display for MatchArm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let vars = self.vars.join(", ");
+        write!(
+            f,
+            "{}::{}({}) => {}",
+            self.type_name, self.variant, vars, self.body
+        )
     }
 }
 
@@ -147,6 +203,18 @@ fn write_expr(
     match expr {
         Expr::Num(value) => write!(f, "{}", value),
         Expr::Var(name) => write!(f, "{}", name),
+        Expr::Ctor {
+            type_name,
+            variant,
+            args,
+        } => {
+            let args = args
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            write!(f, "{}::{}({})", type_name, variant, args)
+        }
         Expr::Op(lhs, op, rhs) => {
             let precedence = op.precedence();
             let needs_parens = precedence < parent_precedence
@@ -217,6 +285,36 @@ unit() = ()"
         );
 
         parser::parse_program(&program.to_string()).expect("printed program parses");
+    }
+
+    #[test]
+    fn prints_adt_defs_before_init() {
+        let input = r#"
+            data Option = None | Some(int)
+
+            init = main()
+
+            main() = use(Option::Some(1))
+            use(opt: Option) = match opt { Option::None() => fail(), Option::Some(v) => done(v) }
+            done(v: int) = ()
+            fail() = fail
+        "#;
+        let program = parser::parse_program(input).expect("valid ADT program");
+
+        assert_eq!(
+            program.to_string(),
+            "\
+data Option = None | Some(int)
+
+init = main()
+
+main() = use(Option::Some(1))
+done(v: int) = ()
+fail() = fail
+use(opt: Option) = match opt { Option::None() => fail(), Option::Some(v) => done(v) }"
+        );
+
+        parser::parse_program(&program.to_string()).expect("printed ADT program parses");
     }
 
     #[test]

@@ -1,12 +1,27 @@
 use std::collections::HashMap;
 
 pub type FuncName = String;
+pub type TypeName = String;
 pub type VarName = String;
+pub type VariantName = String;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Program {
+    pub adts: Vec<AdtDef>,
     pub functions: HashMap<FuncName, Function>,
     pub init: FuncCall,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdtDef {
+    pub name: TypeName,
+    pub variants: Vec<VariantDef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantDef {
+    pub name: VariantName,
+    pub fields: Vec<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +34,7 @@ pub struct Function {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Int,
+    Adt(TypeName),
     Sender(Box<Type>),
     Receiver(Box<Type>),
     Func { params: Vec<Type> },
@@ -44,13 +60,14 @@ impl Type {
     pub fn payload(&self) -> Option<&Type> {
         match self {
             Type::Sender(payload) | Type::Receiver(payload) => Some(payload),
-            Type::Int | Type::Func { .. } => None,
+            Type::Int | Type::Adt(_) | Type::Func { .. } => None,
         }
     }
 
     pub fn is_linear(&self) -> bool {
         match self {
             Type::Int => false,
+            Type::Adt(_) => true,
             Type::Sender(_) => true,
             Type::Receiver(_) => true,
             Type::Func { params: _ } => false,
@@ -80,6 +97,10 @@ pub enum Statement {
         receiver: VarName,
         var: VarName,
         body: FuncCall,
+    },
+    Match {
+        scrutinee: VarName,
+        arms: Vec<MatchArm>,
     },
     Dup {
         sender: VarName,
@@ -124,6 +145,18 @@ impl Statement {
                 }
                 body.substitute_var(var_map);
             }
+            Statement::Match { scrutinee, arms } => {
+                if let Some(new_scrutinee) = var_map.get(scrutinee) {
+                    *scrutinee = new_scrutinee.clone();
+                }
+                for arm in arms {
+                    let mut body_var_map = var_map.clone();
+                    for var in &arm.vars {
+                        body_var_map.remove(var);
+                    }
+                    arm.body.substitute_var(&body_var_map);
+                }
+            }
             Statement::Dup { body, sender, .. } => {
                 if let Some(new_sender) = var_map.get(sender) {
                     *sender = new_sender.clone();
@@ -132,6 +165,14 @@ impl Statement {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchArm {
+    pub type_name: TypeName,
+    pub variant: VariantName,
+    pub vars: Vec<VarName>,
+    pub body: FuncCall,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -160,6 +201,11 @@ impl FuncCall {
 pub enum Expr {
     Num(i32),
     Var(VarName),
+    Ctor {
+        type_name: TypeName,
+        variant: VariantName,
+        args: Vec<Expr>,
+    },
     Op(Box<Expr>, OpKind, Box<Expr>),
 }
 
@@ -170,6 +216,11 @@ impl Expr {
             Expr::Var(v) => {
                 if let Some(new_v) = var_map.get(v) {
                     *v = new_v.clone();
+                }
+            }
+            Expr::Ctor { args, .. } => {
+                for arg in args {
+                    arg.substitute_var(var_map);
                 }
             }
             Expr::Op(lhs, _, rhs) => {
@@ -183,6 +234,7 @@ impl Expr {
         match self {
             Expr::Num(_) => vec![],
             Expr::Var(v) => vec![v.clone()],
+            Expr::Ctor { args, .. } => args.iter().flat_map(Expr::free_vars).collect(),
             Expr::Op(lhs, _, rhs) => {
                 let mut vars = lhs.free_vars();
                 vars.extend(rhs.free_vars());

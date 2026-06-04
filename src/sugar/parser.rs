@@ -1,14 +1,27 @@
 use anyhow::{Result, anyhow};
 
-use crate::core::ast::Type;
+use crate::core::ast::{AdtDef, Type, VariantDef};
 
-use super::ast::{AssignOp, BinaryOp, Binding, Block, Expr, MethodCall, Program, Stmt};
+use super::ast::{AssignOp, BinaryOp, Binding, Block, Expr, MatchArm, MethodCall, Program, Stmt};
 
 peg::parser! {
     grammar sugar_parser() for str {
         pub rule program() -> Program
-            = _ statements:stmt()* _ {
-                Program { statements }
+            = _ adts:adt_def()* statements:stmt()* _ {
+                Program { adts, statements }
+            }
+
+        rule adt_def() -> AdtDef
+            = kw_data() name:ident() assign() variants:(variant_def() ++ bar()) {
+                AdtDef { name, variants }
+            }
+
+        rule variant_def() -> VariantDef
+            = name:ident() fields:(lparen() fields:(type_() ** comma())? rparen() { fields.unwrap_or_default() })? {
+                VariantDef {
+                    name,
+                    fields: fields.unwrap_or_default(),
+                }
             }
 
         rule stmt() -> Stmt
@@ -19,6 +32,7 @@ peg::parser! {
             / spawn_stmt()
             / while_stmt()
             / if_stmt()
+            / match_stmt()
             / call_stmt()
             / expr_stmt()
 
@@ -67,6 +81,24 @@ peg::parser! {
         rule if_stmt() -> Stmt
             = kw_if() lparen() cond:expression() rparen() then_block:block() else_block:else_part()? {
                 Stmt::If { cond, then_block, else_block }
+            }
+
+        rule match_stmt() -> Stmt
+            = kw_match() scrutinee:ident() lbrace() arms:match_arm_with_sep()+ rbrace() {
+                Stmt::Match { scrutinee, arms }
+            }
+
+        rule match_arm_with_sep() -> MatchArm
+            = arm:match_arm() comma()? { arm }
+
+        rule match_arm() -> MatchArm
+            = type_name:ident() double_colon() variant:ident() lparen() vars:(ident() ** comma())? rparen() arrow() block:block() {
+                MatchArm {
+                    type_name,
+                    variant,
+                    vars: vars.unwrap_or_default(),
+                    block,
+                }
             }
 
         rule else_part() -> Block
@@ -160,8 +192,18 @@ peg::parser! {
         rule primary() -> Expr
             = bool_literal()
             / number()
+            / constructor()
             / variable()
             / lparen() expr:expression() rparen() { expr }
+
+        rule constructor() -> Expr
+            = type_name:ident() double_colon() variant:ident() lparen() args:(expression() ** comma())? rparen() {
+                Expr::Ctor {
+                    type_name,
+                    variant,
+                    args: args.unwrap_or_default(),
+                }
+            }
 
         rule bool_literal() -> Expr
             = kw_false() { Expr::Int(0) }
@@ -180,6 +222,7 @@ peg::parser! {
             = sender_type()
             / receiver_type()
             / int_type()
+            / adt_type()
 
         rule sender_type() -> Type
             = quiet!{ "Sender" }
@@ -199,6 +242,9 @@ peg::parser! {
         rule int_type() -> Type
             = quiet!{ "int" }
               !ident_char() _() { Type::Int }
+
+        rule adt_type() -> Type
+            = name:ident() { Type::Adt(name) }
 
         rule equality_op() -> BinaryOp
             = eqeq() { BinaryOp::Eq }
@@ -225,6 +271,8 @@ peg::parser! {
             / quiet!{ "while" } !ident_char()
             / quiet!{ "if" } !ident_char()
             / quiet!{ "else" } !ident_char()
+            / quiet!{ "match" } !ident_char()
+            / quiet!{ "data" } !ident_char()
             / quiet!{ "spawn" } !ident_char()
             / quiet!{ "channel" } !ident_char()
             / quiet!{ "send" } !ident_char()
@@ -244,6 +292,9 @@ peg::parser! {
         rule kw_let()
             = quiet!{ "let" } !ident_char() _()
 
+        rule kw_data()
+            = quiet!{ "data" } !ident_char() _()
+
         rule kw_while()
             = quiet!{ "while" } !ident_char() _()
 
@@ -252,6 +303,9 @@ peg::parser! {
 
         rule kw_else()
             = quiet!{ "else" } !ident_char() _()
+
+        rule kw_match()
+            = quiet!{ "match" } !ident_char() _()
 
         rule kw_spawn()
             = quiet!{ "spawn" } !ident_char() _()
@@ -295,11 +349,20 @@ peg::parser! {
         rule comma()
             = quiet!{ "," } _()
 
+        rule bar()
+            = quiet!{ "|" } _()
+
         rule semi()
             = quiet!{ ";" } _()
 
         rule dot()
             = quiet!{ "." } _()
+
+        rule double_colon()
+            = quiet!{ "::" } _()
+
+        rule arrow()
+            = quiet!{ "=>" } _()
 
         rule assign()
             = quiet!{ "=" } _()
@@ -637,6 +700,58 @@ mod tests {
             program.statements,
             vec![Stmt::Assert(int(0)), Stmt::Assert(int(1))]
         );
+    }
+
+    #[test]
+    fn parses_adts_constructors_and_match() {
+        let program = parse_program(
+            r#"
+            data Box = Empty | Hold(Sender<int>)
+            let s, r = channel();
+            let b = Box::Hold(s);
+            match b {
+              Box::Empty() => {
+                r.drop();
+              },
+              Box::Hold(s2) => {
+                s2.drop();
+                r.drop();
+              }
+            }
+            "#,
+        )
+        .expect("ADT example should parse");
+
+        assert_eq!(
+            program.adts,
+            vec![AdtDef {
+                name: "Box".to_string(),
+                variants: vec![
+                    VariantDef {
+                        name: "Empty".to_string(),
+                        fields: vec![],
+                    },
+                    VariantDef {
+                        name: "Hold".to_string(),
+                        fields: vec![Type::int_sender()],
+                    },
+                ],
+            }]
+        );
+        assert_eq!(
+            program.statements[1],
+            Stmt::Let {
+                binding: Binding {
+                    var: "b".to_string(),
+                },
+                value: Expr::Ctor {
+                    type_name: "Box".to_string(),
+                    variant: "Hold".to_string(),
+                    args: vec![var("s")],
+                },
+            }
+        );
+        assert!(matches!(program.statements[2], Stmt::Match { .. }));
     }
 
     #[test]
