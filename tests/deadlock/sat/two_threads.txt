@@ -1,0 +1,13 @@
+init = main()
+
+main() = new s1, r1 in setup(s1, r1)
+setup(s1: Sender, r1: Receiver) = new s2, r2 in start(s1, r1, s2, r2)
+start(s1: Sender, r1: Receiver, s2: Sender, r2: Receiver) = spawn(thread_a(s1, r2)); thread_b(s2, r1)
+
+thread_a(to_b: Sender, from_b: Receiver) = send 1 to to_b; reply_a(to_b, from_b)
+reply_a(to_b: Sender, from_b: Receiver) = let v = recv from_b in done(to_b, from_b)
+
+thread_b(to_a: Sender, from_a: Receiver) = let v = recv from_a in reply_b(to_a, from_a)
+reply_b(to_a: Sender, from_a: Receiver) = send 1 to to_a; done(to_a, from_a)
+
+done(s: Sender, r: Receiver) = ()

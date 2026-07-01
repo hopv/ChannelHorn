@@ -483,7 +483,16 @@ impl ast::Statement {
     fn lower_to_chc(&self, ctx: &mut Ctx, lctx: &LocalCtx) -> Result<DisjunctiveBody> {
         Ok(match self {
             ast::Statement::Unit => {
-                vec![]
+                if ctx.setting.is_deadlock_mode() {
+                    let mut body = ctx.terminal_closed_body()?;
+                    body.constraints.push(Constraint::Eq(
+                        lctx.error_var.clone(),
+                        ctx.setting.terminated_status(),
+                    ));
+                    vec![body]
+                } else {
+                    vec![]
+                }
             }
 
             ast::Statement::Fail => {
@@ -857,22 +866,24 @@ impl ast::Function {
             .map(|(param_name, _)| Term::Var(param_name.clone()))
             .collect::<Vec<Term>>();
 
-        clauses.push(Clause {
-            forall: ctx.var_declarations.clone().into_iter().collect(),
-            head: Some(PredicateAtom {
-                name: self.name.clone(),
-                args: [
-                    if ctx.setting.no_timestamps {
-                        vec![ctx.setting.terminated_status()]
-                    } else {
-                        vec![ctx.setting.terminated_status(), time_var.clone()]
-                    },
-                    param_terms.clone(),
-                ]
-                .concat(),
-            }),
-            body: ctx.terminal_closed_body()?,
-        });
+        if !ctx.setting.is_deadlock_mode() {
+            clauses.push(Clause {
+                forall: ctx.var_declarations.clone().into_iter().collect(),
+                head: Some(PredicateAtom {
+                    name: self.name.clone(),
+                    args: [
+                        if ctx.setting.no_timestamps {
+                            vec![ctx.setting.terminated_status()]
+                        } else {
+                            vec![ctx.setting.terminated_status(), time_var.clone()]
+                        },
+                        param_terms.clone(),
+                    ]
+                    .concat(),
+                }),
+                body: ctx.terminal_closed_body()?,
+            });
+        }
 
         let lctx = LocalCtx {
             error_var: error_var.clone(),
@@ -1228,6 +1239,40 @@ mod tests {
             });
 
             has_blocked_status && has_nil_receiver && closes_sender
+        }));
+    }
+
+    #[test]
+    fn deadlock_mode_does_not_add_synthetic_termination_for_non_unit_functions() {
+        let program = parser::parse_program(
+            r#"
+            init = main()
+
+            main() = new s, r in wait(s, r)
+            wait(s: Sender, r: Receiver) = let v = recv r in done(s, r)
+            done(s: Sender, r: Receiver) = ()
+            "#,
+        )
+        .expect("program should parse");
+
+        let chc = program
+            .lower_to_chc(deadlock_setting(false))
+            .expect("program should lower");
+
+        assert!(!chc.clauses.iter().any(|clause| {
+            clause.head.as_ref().is_some_and(|head| {
+                head.name == "wait" && matches!(head.args.first(), Some(Term::Int(1)))
+            })
+        }));
+        assert!(chc.clauses.iter().any(|clause| {
+            clause.head.as_ref().is_some_and(|head| head.name == "done")
+                && clause.body.constraints.iter().any(|constraint| {
+                    matches!(
+                        constraint,
+                        Constraint::Eq(Term::Var(status), Term::Int(1))
+                            if status == DEFAULT_ERROR_VAR
+                    )
+                })
         }));
     }
 
