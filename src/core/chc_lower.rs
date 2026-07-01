@@ -1,18 +1,488 @@
 use anyhow::Result;
-use std::collections::HashMap;
+use std::{collections::HashMap, marker::PhantomData};
 
 use crate::{
     chc::{
-        Body, CHC, Clause, Constraint, Datatype, DatatypeVariant, DisjunctiveBody, PredicateAtom,
-        PredicateName, Setting, Term, Type,
+        Body, CHC, CheckMode, Clause, Constraint, Datatype, DatatypeVariant, DisjunctiveBody,
+        PredicateAtom, PredicateName, Setting, Term, Type, status_blocked, status_fail,
+        status_terminated,
     },
     core::ast::{self},
 };
 
 static CLOSED_PREDICATE: &str = "%Closed";
 
-#[derive(Debug, Default)]
-pub struct Ctx {
+trait TimeEncoding {
+    fn channel_item_type(payload_ty: Type) -> Type;
+    fn predicate_arg_types(status_ty: Type) -> Vec<Type>;
+    fn channel_item_value(item: Term) -> Term;
+    fn predicate_args(status: Term, time: Term) -> Vec<Term>;
+    fn sorted_new_predicates(sorted_predicate: PredicateName, sender: Term) -> Vec<PredicateAtom>;
+    fn sorted_primitive_clauses(sorted_predicate: PredicateName, prophecy_ty: Type) -> Vec<Clause>;
+    fn initial_time_var<P: LoweringPolicy>(ctx: &mut Ctx<P>) -> Result<Term>;
+    fn send_item_and_lctx<P: LoweringPolicy>(
+        ctx: &mut Ctx<P>,
+        lctx: &LocalCtx,
+        value: Term,
+    ) -> Result<(Term, LocalCtx, Vec<Constraint>)>;
+    fn recv_lctx<P: LoweringPolicy>(ctx: &mut Ctx<P>, lctx: &LocalCtx) -> Result<LocalCtx>;
+    fn recv_item_and_constraints<P: LoweringPolicy>(
+        ctx: &mut Ctx<P>,
+        lctx: &LocalCtx,
+        recv_lctx: &LocalCtx,
+        value: Term,
+    ) -> Result<(Term, Vec<Constraint>)>;
+}
+
+trait CheckEncoding {
+    fn status_type() -> Type;
+    fn status(status: CheckStatus) -> Term;
+    fn unit_body<P: LoweringPolicy>(ctx: &mut Ctx<P>, lctx: &LocalCtx) -> Result<Option<Body>>;
+    fn spawn_status_bodies(
+        parent_error: Term,
+        first_error: Term,
+        second_error: Term,
+    ) -> DisjunctiveBody;
+    fn recv_blocked_body<P: LoweringPolicy>(
+        ctx: &mut Ctx<P>,
+        lctx: &LocalCtx,
+        receiver_term: Term,
+        receiver_ty: Type,
+        type_env_before_recv: HashMap<ast::VarName, ast::Type>,
+    ) -> Result<Option<Body>>;
+    fn synthetic_termination_clause<P: LoweringPolicy>(
+        ctx: &mut Ctx<P>,
+        name: &str,
+        time_var: Term,
+        param_terms: &[Term],
+    ) -> Result<Option<Clause>>;
+}
+
+#[derive(Clone, Copy)]
+enum CheckStatus {
+    Failure,
+    Terminated,
+    InitQuery,
+    Blocked,
+}
+
+trait LoweringPolicy {
+    type Time: TimeEncoding;
+    type Check: CheckEncoding;
+}
+
+struct Timestamped;
+struct Untimestamped;
+struct FailReachabilityCheck;
+struct DeadlockFreedomCheck;
+
+struct Policy<T, C>(PhantomData<(T, C)>);
+
+impl<T: TimeEncoding, C: CheckEncoding> LoweringPolicy for Policy<T, C> {
+    type Time = T;
+    type Check = C;
+}
+
+impl TimeEncoding for Timestamped {
+    fn channel_item_type(payload_ty: Type) -> Type {
+        Type::timestamped_value(payload_ty)
+    }
+
+    fn predicate_arg_types(status_ty: Type) -> Vec<Type> {
+        vec![status_ty, Type::Int]
+    }
+
+    fn channel_item_value(item: Term) -> Term {
+        Term::Val(item.into())
+    }
+
+    fn predicate_args(status: Term, time: Term) -> Vec<Term> {
+        vec![status, time]
+    }
+
+    fn sorted_new_predicates(sorted_predicate: PredicateName, sender: Term) -> Vec<PredicateAtom> {
+        vec![PredicateAtom {
+            name: sorted_predicate,
+            args: vec![sender],
+        }]
+    }
+
+    fn sorted_primitive_clauses(sorted_predicate: PredicateName, prophecy_ty: Type) -> Vec<Clause> {
+        let timestamped_value_ty = match &prophecy_ty {
+            Type::Lst(inner) => (**inner).clone(),
+            _ => unreachable!("prophecy type is always a list"),
+        };
+        vec![
+            Clause {
+                forall: vec![],
+                head: Some(PredicateAtom {
+                    name: sorted_predicate.clone(),
+                    args: vec![Term::Nil(prophecy_ty.clone())],
+                }),
+                body: Body::default(),
+            },
+            Clause {
+                forall: vec![
+                    ("l".to_string(), prophecy_ty.clone()),
+                    ("p".to_string(), timestamped_value_ty.clone()),
+                ],
+                head: Some(PredicateAtom {
+                    name: sorted_predicate.clone(),
+                    args: vec![Term::Var("l".to_string())],
+                }),
+                body: Body {
+                    predicates: vec![],
+                    constraints: vec![Constraint::Eq(
+                        Term::Var("l".to_string()),
+                        Term::Cons(
+                            Term::Var("p".to_string()).into(),
+                            Term::Nil(prophecy_ty.clone()).into(),
+                        ),
+                    )],
+                },
+            },
+            Clause {
+                forall: vec![
+                    ("l".to_string(), prophecy_ty.clone()),
+                    ("l2".to_string(), prophecy_ty.clone()),
+                    ("l3".to_string(), prophecy_ty.clone()),
+                    ("p".to_string(), timestamped_value_ty.clone()),
+                    ("p2".to_string(), timestamped_value_ty),
+                ],
+                head: Some(PredicateAtom {
+                    name: sorted_predicate.clone(),
+                    args: vec![Term::Var("l".to_string())],
+                }),
+                body: Body {
+                    predicates: vec![PredicateAtom {
+                        name: sorted_predicate,
+                        args: vec![Term::Var("l2".to_string())],
+                    }],
+                    constraints: vec![
+                        Constraint::Eq(
+                            Term::Var("l".to_string()),
+                            Term::Cons(
+                                Term::Var("p".to_string()).into(),
+                                Term::Var("l2".to_string()).into(),
+                            ),
+                        ),
+                        Constraint::Eq(
+                            Term::Var("l2".to_string()),
+                            Term::Cons(
+                                Term::Var("p2".to_string()).into(),
+                                Term::Var("l3".to_string()).into(),
+                            ),
+                        ),
+                        Constraint::Le(
+                            Term::Key(Term::Var("p".to_string()).into()),
+                            Term::Key(Term::Var("p2".to_string()).into()),
+                        ),
+                    ],
+                },
+            },
+        ]
+    }
+
+    fn initial_time_var<P: LoweringPolicy>(ctx: &mut Ctx<P>) -> Result<Term> {
+        ctx.insert_declared_var(DEFAULT_TIME_VAR, Type::Int)
+    }
+
+    fn send_item_and_lctx<P: LoweringPolicy>(
+        ctx: &mut Ctx<P>,
+        lctx: &LocalCtx,
+        value: Term,
+    ) -> Result<(Term, LocalCtx, Vec<Constraint>)> {
+        let new_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
+        let new_time_term = ctx.insert_declared_var(&new_time_var, Type::Int)?;
+        Ok((
+            Term::Pair(new_time_term.clone().into(), value.into()),
+            LocalCtx {
+                error_var: lctx.error_var.clone(),
+                time_var: new_time_term.clone(),
+            },
+            vec![Constraint::Le(lctx.time_var.clone(), new_time_term)],
+        ))
+    }
+
+    fn recv_lctx<P: LoweringPolicy>(ctx: &mut Ctx<P>, lctx: &LocalCtx) -> Result<LocalCtx> {
+        let new_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
+        let new_time_term = ctx.insert_declared_var(&new_time_var, Type::Int)?;
+        Ok(LocalCtx {
+            error_var: lctx.error_var.clone(),
+            time_var: new_time_term,
+        })
+    }
+
+    fn recv_item_and_constraints<P: LoweringPolicy>(
+        ctx: &mut Ctx<P>,
+        lctx: &LocalCtx,
+        recv_lctx: &LocalCtx,
+        value: Term,
+    ) -> Result<(Term, Vec<Constraint>)> {
+        let tmp_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
+        let tmp_time_term = ctx.insert_declared_var(&tmp_time_var, Type::Int)?;
+        Ok((
+            Term::Pair(tmp_time_term.clone().into(), value.into()),
+            vec![
+                Constraint::Lt(tmp_time_term, recv_lctx.time_var.clone()),
+                Constraint::Le(lctx.time_var.clone(), recv_lctx.time_var.clone()),
+            ],
+        ))
+    }
+}
+
+impl TimeEncoding for Untimestamped {
+    fn channel_item_type(payload_ty: Type) -> Type {
+        payload_ty
+    }
+
+    fn predicate_arg_types(status_ty: Type) -> Vec<Type> {
+        vec![status_ty]
+    }
+
+    fn channel_item_value(item: Term) -> Term {
+        item
+    }
+
+    fn predicate_args(status: Term, _time: Term) -> Vec<Term> {
+        vec![status]
+    }
+
+    fn sorted_new_predicates(
+        _sorted_predicate: PredicateName,
+        _sender: Term,
+    ) -> Vec<PredicateAtom> {
+        vec![]
+    }
+
+    fn sorted_primitive_clauses(
+        _sorted_predicate: PredicateName,
+        _prophecy_ty: Type,
+    ) -> Vec<Clause> {
+        vec![]
+    }
+
+    fn initial_time_var<P: LoweringPolicy>(_ctx: &mut Ctx<P>) -> Result<Term> {
+        Ok(Term::Var(DEFAULT_TIME_VAR.to_string()))
+    }
+
+    fn send_item_and_lctx<P: LoweringPolicy>(
+        _ctx: &mut Ctx<P>,
+        lctx: &LocalCtx,
+        value: Term,
+    ) -> Result<(Term, LocalCtx, Vec<Constraint>)> {
+        Ok((value, lctx.clone(), vec![]))
+    }
+
+    fn recv_lctx<P: LoweringPolicy>(_ctx: &mut Ctx<P>, lctx: &LocalCtx) -> Result<LocalCtx> {
+        Ok(lctx.clone())
+    }
+
+    fn recv_item_and_constraints<P: LoweringPolicy>(
+        _ctx: &mut Ctx<P>,
+        _lctx: &LocalCtx,
+        _recv_lctx: &LocalCtx,
+        value: Term,
+    ) -> Result<(Term, Vec<Constraint>)> {
+        Ok((value, vec![]))
+    }
+}
+
+impl CheckEncoding for FailReachabilityCheck {
+    fn status_type() -> Type {
+        Type::Bool
+    }
+
+    fn status(status: CheckStatus) -> Term {
+        match status {
+            CheckStatus::Failure | CheckStatus::InitQuery => Term::Bool(true),
+            CheckStatus::Terminated => Term::Bool(false),
+            CheckStatus::Blocked => unreachable!("fail reachability does not use blocked status"),
+        }
+    }
+
+    fn unit_body<P: LoweringPolicy>(_ctx: &mut Ctx<P>, _lctx: &LocalCtx) -> Result<Option<Body>> {
+        Ok(None)
+    }
+
+    fn spawn_status_bodies(
+        parent_error: Term,
+        first_error: Term,
+        second_error: Term,
+    ) -> DisjunctiveBody {
+        vec![Body {
+            predicates: vec![],
+            constraints: vec![Constraint::Eq(
+                parent_error,
+                Term::LOr(Box::new(first_error), Box::new(second_error)),
+            )],
+        }]
+    }
+
+    fn recv_blocked_body<P: LoweringPolicy>(
+        _ctx: &mut Ctx<P>,
+        _lctx: &LocalCtx,
+        _receiver_term: Term,
+        _receiver_ty: Type,
+        _type_env_before_recv: HashMap<ast::VarName, ast::Type>,
+    ) -> Result<Option<Body>> {
+        Ok(None)
+    }
+
+    fn synthetic_termination_clause<P: LoweringPolicy>(
+        ctx: &mut Ctx<P>,
+        name: &str,
+        time_var: Term,
+        param_terms: &[Term],
+    ) -> Result<Option<Clause>> {
+        Ok(Some(Clause {
+            forall: ctx.var_declarations.clone().into_iter().collect(),
+            head: Some(PredicateAtom {
+                name: name.to_string(),
+                args: [
+                    Term::predicate_args_for_policy::<P>(
+                        Self::status(CheckStatus::Terminated),
+                        time_var,
+                    ),
+                    param_terms.to_vec(),
+                ]
+                .concat(),
+            }),
+            body: ctx.terminal_closed_body()?,
+        }))
+    }
+}
+
+impl CheckEncoding for DeadlockFreedomCheck {
+    fn status_type() -> Type {
+        Type::Int
+    }
+
+    fn status(status: CheckStatus) -> Term {
+        match status {
+            CheckStatus::Failure => status_fail(),
+            CheckStatus::Terminated => status_terminated(),
+            CheckStatus::InitQuery | CheckStatus::Blocked => status_blocked(),
+        }
+    }
+
+    fn unit_body<P: LoweringPolicy>(ctx: &mut Ctx<P>, lctx: &LocalCtx) -> Result<Option<Body>> {
+        let mut body = ctx.terminal_closed_body()?;
+        body.constraints.push(Constraint::Eq(
+            lctx.error_var.clone(),
+            Self::status(CheckStatus::Terminated),
+        ));
+        Ok(Some(body))
+    }
+
+    fn spawn_status_bodies(
+        parent_error: Term,
+        first_error: Term,
+        second_error: Term,
+    ) -> DisjunctiveBody {
+        vec![
+            Body {
+                predicates: vec![],
+                constraints: vec![
+                    Constraint::Le(first_error.clone(), second_error.clone()),
+                    Constraint::Eq(parent_error.clone(), first_error.clone()),
+                ],
+            },
+            Body {
+                predicates: vec![],
+                constraints: vec![
+                    Constraint::Le(second_error.clone(), first_error),
+                    Constraint::Eq(parent_error, second_error),
+                ],
+            },
+        ]
+    }
+
+    fn recv_blocked_body<P: LoweringPolicy>(
+        ctx: &mut Ctx<P>,
+        lctx: &LocalCtx,
+        receiver_term: Term,
+        receiver_ty: Type,
+        type_env_before_recv: HashMap<ast::VarName, ast::Type>,
+    ) -> Result<Option<Body>> {
+        let type_env_after_recv = std::mem::replace(&mut ctx.type_env, type_env_before_recv);
+        let mut blocked_body = ctx.terminal_closed_body()?;
+        ctx.type_env = type_env_after_recv;
+        blocked_body.constraints.extend([
+            Constraint::Eq(receiver_term, Term::Nil(receiver_ty)),
+            Constraint::Eq(lctx.error_var.clone(), Self::status(CheckStatus::Blocked)),
+        ]);
+        Ok(Some(blocked_body))
+    }
+
+    fn synthetic_termination_clause<P: LoweringPolicy>(
+        _ctx: &mut Ctx<P>,
+        _name: &str,
+        _time_var: Term,
+        _param_terms: &[Term],
+    ) -> Result<Option<Clause>> {
+        Ok(None)
+    }
+}
+
+impl Type {
+    fn prophecy_for_policy<P: LoweringPolicy>(payload_ty: Type) -> Type {
+        Type::Lst(Box::new(P::Time::channel_item_type(payload_ty)))
+    }
+
+    fn channel_item_for_policy<P: LoweringPolicy>(payload_ty: Type) -> Type {
+        P::Time::channel_item_type(payload_ty)
+    }
+
+    fn predicate_args_for_policy<P: LoweringPolicy>(status_ty: Type) -> Vec<Type> {
+        P::Time::predicate_arg_types(status_ty)
+    }
+}
+
+impl Term {
+    fn channel_item_value_for_policy<P: LoweringPolicy>(item: Term) -> Term {
+        P::Time::channel_item_value(item)
+    }
+
+    fn predicate_args_for_policy<P: LoweringPolicy>(status: Term, time: Term) -> Vec<Term> {
+        P::Time::predicate_args(status, time)
+    }
+}
+
+impl PredicateAtom {
+    fn sorted_new_for_policy<P: LoweringPolicy>(
+        sorted_predicate: PredicateName,
+        sender: Term,
+    ) -> Vec<Self> {
+        P::Time::sorted_new_predicates(sorted_predicate, sender)
+    }
+}
+
+impl Clause {
+    fn sorted_primitive_clauses_for_policy<P: LoweringPolicy>(
+        sorted_predicate: PredicateName,
+        prophecy_ty: Type,
+    ) -> Vec<Self> {
+        P::Time::sorted_primitive_clauses(sorted_predicate, prophecy_ty)
+    }
+}
+
+impl Body {
+    fn spawn_bodies_for_policy<P: LoweringPolicy>(
+        parent_error: Term,
+        first_error: Term,
+        second_error: Term,
+        body: Body,
+    ) -> DisjunctiveBody {
+        P::Check::spawn_status_bodies(parent_error, first_error, second_error)
+            .into_iter()
+            .map(|status_body| status_body.concat(body.clone()))
+            .collect()
+    }
+}
+
+#[derive(Debug)]
+struct Ctx<P: LoweringPolicy> {
     var_declarations: HashMap<PredicateName, Type>,
     fun_declarations: HashMap<PredicateName, Vec<Type>>,
     type_env: HashMap<ast::VarName, ast::Type>,
@@ -21,10 +491,26 @@ pub struct Ctx {
     closed_payload_types: Vec<ast::Type>,
     closed_value_types: Vec<ast::Type>,
     unused_num: usize,
-    setting: Setting,
+    _policy: PhantomData<P>,
 }
 
-impl Ctx {
+impl<P: LoweringPolicy> Default for Ctx<P> {
+    fn default() -> Self {
+        Self {
+            var_declarations: HashMap::new(),
+            fun_declarations: HashMap::new(),
+            type_env: HashMap::new(),
+            adts: HashMap::new(),
+            primitive_payload_types: Vec::new(),
+            closed_payload_types: Vec::new(),
+            closed_value_types: Vec::new(),
+            unused_num: 0,
+            _policy: PhantomData,
+        }
+    }
+}
+
+impl<P: LoweringPolicy> Ctx<P> {
     fn insert_declared_var(&mut self, name: impl Into<PredicateName>, ty: Type) -> Result<Term> {
         let name = name.into();
         if let Some(existing_ty) = self.var_declarations.get(&name) {
@@ -96,12 +582,72 @@ impl Ctx {
         var_name
     }
 
+    fn initial_time_var(&mut self) -> Result<Term> {
+        P::Time::initial_time_var(self)
+    }
+
+    fn send_item_and_lctx(
+        &mut self,
+        lctx: &LocalCtx,
+        value: Term,
+    ) -> Result<(Term, LocalCtx, Vec<Constraint>)> {
+        P::Time::send_item_and_lctx(self, lctx, value)
+    }
+
+    fn recv_lctx(&mut self, lctx: &LocalCtx) -> Result<LocalCtx> {
+        P::Time::recv_lctx(self, lctx)
+    }
+
+    fn recv_item_and_constraints(
+        &mut self,
+        lctx: &LocalCtx,
+        recv_lctx: &LocalCtx,
+        value: Term,
+    ) -> Result<(Term, Vec<Constraint>)> {
+        P::Time::recv_item_and_constraints(self, lctx, recv_lctx, value)
+    }
+
+    fn unit_bodies(&mut self, lctx: &LocalCtx) -> Result<DisjunctiveBody> {
+        Ok(P::Check::unit_body(self, lctx)?.into_iter().collect())
+    }
+
+    fn recv_bodies(
+        &mut self,
+        lctx: &LocalCtx,
+        normal_body: Body,
+        receiver_term: Term,
+        receiver_ty: Type,
+        type_env_before_recv: HashMap<ast::VarName, ast::Type>,
+    ) -> Result<DisjunctiveBody> {
+        let blocked_body = P::Check::recv_blocked_body(
+            self,
+            lctx,
+            receiver_term,
+            receiver_ty,
+            type_env_before_recv,
+        )?;
+        Ok(std::iter::once(normal_body).chain(blocked_body).collect())
+    }
+
+    fn synthetic_termination_clauses(
+        &mut self,
+        name: &str,
+        time_var: Term,
+        param_terms: &[Term],
+    ) -> Result<Vec<Clause>> {
+        Ok(
+            P::Check::synthetic_termination_clause(self, name, time_var, param_terms)?
+                .into_iter()
+                .collect(),
+        )
+    }
+
     fn ensure_primitive_payload(&mut self, payload_ty: Type) {
         if !self.primitive_payload_types.contains(&payload_ty) {
             self.primitive_payload_types.push(payload_ty.clone());
         }
         self.fun_declarations
-            .extend(CHC::primitive_fun_declarations(&self.setting, payload_ty));
+            .extend(CHC::primitive_fun_declarations_for_policy::<P>(payload_ty));
     }
 
     fn primitive_predicates_for_payload(
@@ -113,14 +659,14 @@ impl Ctx {
     }
 
     fn ensure_closed_payload(&mut self, payload: ast::Type) -> Result<PredicateName> {
-        let name = closed_predicate_name(&payload);
+        let name = payload.closed_predicate_name();
         if !self.closed_payload_types.contains(&payload) {
-            let predicate_ty = closed_list_type(&payload, &self.setting)?;
+            let predicate_ty = payload.closed_list_type::<P>()?;
             self.closed_payload_types.push(payload.clone());
             self.fun_declarations
                 .insert(name.clone(), vec![predicate_ty]);
             if let ast::Type::Receiver(inner) = &payload {
-                if needs_closed_value(inner) {
+                if inner.needs_closed_value() {
                     self.ensure_closed_payload((**inner).clone())?;
                 }
             }
@@ -136,12 +682,10 @@ impl Ctx {
     ) -> Result<()> {
         match ty {
             ast::Type::Sender(_) => {
-                body.constraints.push(Constraint::Eq(
-                    term,
-                    Term::Nil(ty.lower_to_chc(&self.setting)?),
-                ));
+                body.constraints
+                    .push(Constraint::Eq(term, Term::Nil(ty.lower_to_chc::<P>()?)));
             }
-            ast::Type::Receiver(payload) if needs_closed_value(payload) => {
+            ast::Type::Receiver(payload) if payload.needs_closed_value() => {
                 let name = self.ensure_closed_payload((**payload).clone())?;
                 body.predicates.push(PredicateAtom {
                     name,
@@ -161,9 +705,9 @@ impl Ctx {
     }
 
     fn ensure_closed_adt_value(&mut self, ty: ast::Type) -> Result<PredicateName> {
-        let name = closed_value_predicate_name(&ty);
+        let name = ty.closed_value_predicate_name();
         if !self.closed_value_types.contains(&ty) {
-            let chc_ty = ty.lower_to_chc(&self.setting)?;
+            let chc_ty = ty.lower_to_chc::<P>()?;
             self.closed_value_types.push(ty.clone());
             self.fun_declarations.insert(name.clone(), vec![chc_ty]);
             if let ast::Type::Adt(type_name) = &ty {
@@ -175,7 +719,7 @@ impl Ctx {
                 for variant in &adt.variants {
                     for field in &variant.fields {
                         match field {
-                            ast::Type::Receiver(payload) if needs_closed_value(payload) => {
+                            ast::Type::Receiver(payload) if payload.needs_closed_value() => {
                                 self.ensure_closed_payload((**payload).clone())?;
                             }
                             ast::Type::Adt(_) => {
@@ -193,26 +737,17 @@ impl Ctx {
     fn terminal_closed_body(&mut self) -> Result<Body> {
         let mut body = Body::default();
         for (var, ty) in self.collect_linear_vars() {
-            let term = self.insert_declared_var(var, ty.lower_to_chc(&self.setting)?)?;
+            let term = self.insert_declared_var(var, ty.lower_to_chc::<P>()?)?;
             self.add_closed_value_conditions(&mut body, term, &ty)?;
         }
         Ok(body)
     }
 
     fn closed_clauses_for_payload(&mut self, payload: &ast::Type) -> Result<Vec<Clause>> {
-        let predicate_name = closed_predicate_name(payload);
-        let list_ty = closed_list_type(payload, &self.setting)?;
-        let payload_ty = payload.lower_to_chc(&self.setting)?;
-        let item_ty = if self.setting.no_timestamps {
-            payload_ty
-        } else {
-            Type::timestamped_value(payload_ty)
-        };
-        let value_term = if self.setting.no_timestamps {
-            Term::Var("p".to_string())
-        } else {
-            Term::Val(Term::Var("p".to_string()).into())
-        };
+        let predicate_name = payload.closed_predicate_name();
+        let list_ty = payload.closed_list_type::<P>()?;
+        let item_ty = Type::channel_item_for_policy::<P>(payload.lower_to_chc::<P>()?);
+        let value_term = Term::channel_item_value_for_policy::<P>(Term::Var("p".to_string()));
         let mut recursive_body = Body {
             predicates: vec![PredicateAtom {
                 name: predicate_name.clone(),
@@ -256,13 +791,13 @@ impl Ctx {
         let ast::Type::Adt(type_name) = ty else {
             return Ok(vec![]);
         };
-        let predicate_name = closed_value_predicate_name(ty);
+        let predicate_name = ty.closed_value_predicate_name();
         let adt = self
             .adts
             .get(type_name)
             .ok_or_else(|| anyhow::anyhow!("unknown ADT type {}", type_name))?
             .clone();
-        let value_ty = ty.lower_to_chc(&self.setting)?;
+        let value_ty = ty.lower_to_chc::<P>()?;
         let mut clauses = vec![];
         for variant in &adt.variants {
             let field_terms = variant
@@ -276,7 +811,7 @@ impl Ctx {
                 constraints: vec![Constraint::Eq(
                     Term::Var("v".to_string()),
                     Term::Ctor {
-                        name: adt_constructor_name(type_name, &variant.name),
+                        name: DatatypeVariant::constructor_name(type_name, &variant.name),
                         args: field_terms.clone(),
                     },
                 )],
@@ -286,10 +821,7 @@ impl Ctx {
             }
             let mut forall = vec![("v".to_string(), value_ty.clone())];
             for (index, field_ty) in variant.fields.iter().enumerate() {
-                forall.push((
-                    format!("field{}", index),
-                    field_ty.lower_to_chc(&self.setting)?,
-                ));
+                forall.push((format!("field{}", index), field_ty.lower_to_chc::<P>()?));
             }
             clauses.push(Clause {
                 forall,
@@ -304,105 +836,255 @@ impl Ctx {
     }
 }
 
-fn ast_type_suffix(ty: &ast::Type) -> String {
-    match ty {
-        ast::Type::Int => "Int".to_string(),
-        ast::Type::Adt(name) => format!("Adt_{}", name),
-        ast::Type::Sender(payload) => format!("Sender_{}", ast_type_suffix(payload)),
-        ast::Type::Receiver(payload) => format!("Receiver_{}", ast_type_suffix(payload)),
-        ast::Type::Func { params } => {
-            let params = params
-                .iter()
-                .map(ast_type_suffix)
-                .collect::<Vec<_>>()
-                .join("_");
-            format!("Func_{}", params)
-        }
+impl CHC {
+    fn primitive_fun_declarations_for_policy<P: LoweringPolicy>(
+        payload_ty: Type,
+    ) -> HashMap<PredicateName, Vec<Type>> {
+        let prophecy_ty = Type::prophecy_for_policy::<P>(payload_ty.clone());
+        let (sorted_predicate, merge_predicate) = CHC::primitive_predicate_names(&payload_ty);
+        HashMap::from([
+            (sorted_predicate, vec![prophecy_ty.clone()]),
+            (
+                merge_predicate,
+                vec![
+                    prophecy_ty.clone(),
+                    prophecy_ty.clone(),
+                    prophecy_ty.clone(),
+                ],
+            ),
+        ])
+    }
+
+    fn primitive_clauses_for_policy<P: LoweringPolicy>(payload_ty: Type) -> Vec<Clause> {
+        let prophecy_ty = Type::prophecy_for_policy::<P>(payload_ty.clone());
+        let item_ty = Type::channel_item_for_policy::<P>(payload_ty.clone());
+        let (sorted_predicate, merge_predicate) = CHC::primitive_predicate_names(&payload_ty);
+        let mut clauses =
+            Clause::sorted_primitive_clauses_for_policy::<P>(sorted_predicate, prophecy_ty.clone());
+
+        clauses.extend([
+            Clause {
+                forall: vec![("l".to_string(), prophecy_ty.clone())],
+                head: Some(PredicateAtom {
+                    name: merge_predicate.clone(),
+                    args: vec![
+                        Term::Var("l".to_string()),
+                        Term::Nil(prophecy_ty.clone()),
+                        Term::Var("l".to_string()),
+                    ],
+                }),
+                body: Body::default(),
+            },
+            Clause {
+                forall: vec![("l".to_string(), prophecy_ty.clone())],
+                head: Some(PredicateAtom {
+                    name: merge_predicate.clone(),
+                    args: vec![
+                        Term::Nil(prophecy_ty.clone()),
+                        Term::Var("l".to_string()),
+                        Term::Var("l".to_string()),
+                    ],
+                }),
+                body: Body::default(),
+            },
+            Clause {
+                forall: vec![
+                    ("l1".to_string(), prophecy_ty.clone()),
+                    ("l2".to_string(), prophecy_ty.clone()),
+                    ("l3".to_string(), prophecy_ty.clone()),
+                    ("l1tail".to_string(), prophecy_ty.clone()),
+                    ("l3tail".to_string(), prophecy_ty.clone()),
+                    ("p".to_string(), item_ty.clone()),
+                ],
+                head: Some(PredicateAtom {
+                    name: merge_predicate.clone(),
+                    args: vec![
+                        Term::Var("l1".to_string()),
+                        Term::Var("l2".to_string()),
+                        Term::Var("l3".to_string()),
+                    ],
+                }),
+                body: Body {
+                    predicates: vec![PredicateAtom {
+                        name: merge_predicate.clone(),
+                        args: vec![
+                            Term::Var("l1tail".to_string()),
+                            Term::Var("l2".to_string()),
+                            Term::Var("l3tail".to_string()),
+                        ],
+                    }],
+                    constraints: vec![
+                        Constraint::Eq(
+                            Term::Var("l1".to_string()),
+                            Term::Cons(
+                                Term::Var("p".to_string()).into(),
+                                Term::Var("l1tail".to_string()).into(),
+                            ),
+                        ),
+                        Constraint::Eq(
+                            Term::Var("l3".to_string()),
+                            Term::Cons(
+                                Term::Var("p".to_string()).into(),
+                                Term::Var("l3tail".to_string()).into(),
+                            ),
+                        ),
+                    ],
+                },
+            },
+            Clause {
+                forall: vec![
+                    ("l1".to_string(), prophecy_ty.clone()),
+                    ("l2".to_string(), prophecy_ty.clone()),
+                    ("l3".to_string(), prophecy_ty.clone()),
+                    ("l2tail".to_string(), prophecy_ty.clone()),
+                    ("l3tail".to_string(), prophecy_ty),
+                    ("p".to_string(), item_ty),
+                ],
+                head: Some(PredicateAtom {
+                    name: merge_predicate.clone(),
+                    args: vec![
+                        Term::Var("l1".to_string()),
+                        Term::Var("l2".to_string()),
+                        Term::Var("l3".to_string()),
+                    ],
+                }),
+                body: Body {
+                    predicates: vec![PredicateAtom {
+                        name: merge_predicate,
+                        args: vec![
+                            Term::Var("l1".to_string()),
+                            Term::Var("l2tail".to_string()),
+                            Term::Var("l3tail".to_string()),
+                        ],
+                    }],
+                    constraints: vec![
+                        Constraint::Eq(
+                            Term::Var("l2".to_string()),
+                            Term::Cons(
+                                Term::Var("p".to_string()).into(),
+                                Term::Var("l2tail".to_string()).into(),
+                            ),
+                        ),
+                        Constraint::Eq(
+                            Term::Var("l3".to_string()),
+                            Term::Cons(
+                                Term::Var("p".to_string()).into(),
+                                Term::Var("l3tail".to_string()).into(),
+                            ),
+                        ),
+                    ],
+                },
+            },
+        ]);
+
+        clauses
     }
 }
 
-fn closed_predicate_name(payload: &ast::Type) -> PredicateName {
-    format!("{}${}", CLOSED_PREDICATE, ast_type_suffix(payload))
-}
-
-fn closed_value_predicate_name(ty: &ast::Type) -> PredicateName {
-    format!("{}Value${}", CLOSED_PREDICATE, ast_type_suffix(ty))
-}
-
-fn needs_closed_value(ty: &ast::Type) -> bool {
-    match ty {
-        ast::Type::Sender(_) => true,
-        ast::Type::Receiver(payload) => needs_closed_value(payload),
-        ast::Type::Adt(_) => true,
-        ast::Type::Int | ast::Type::Func { .. } => false,
+impl Datatype {
+    fn adt_type_name(name: &str) -> String {
+        format!("Adt${}", name)
     }
 }
 
-fn closed_list_type(payload: &ast::Type, setting: &Setting) -> Result<Type> {
-    Ok(Type::prophecy(
-        setting.no_timestamps,
-        payload.lower_to_chc(setting)?,
-    ))
+impl DatatypeVariant {
+    fn constructor_name(type_name: &str, variant: &str) -> String {
+        format!("Adt${}${}", type_name, variant)
+    }
+
+    fn selector_name(type_name: &str, variant: &str, index: usize) -> String {
+        format!("Adt${}${}${}", type_name, variant, index)
+    }
 }
 
-fn adt_type_name(name: &str) -> String {
-    format!("Adt${}", name)
-}
-
-fn adt_constructor_name(type_name: &str, variant: &str) -> String {
-    format!("Adt${}${}", type_name, variant)
-}
-
-fn adt_selector_name(type_name: &str, variant: &str, index: usize) -> String {
-    format!("Adt${}${}${}", type_name, variant, index)
-}
-
-fn lower_datatype_def(adt: &ast::AdtDef, setting: &Setting) -> Result<Datatype> {
-    let variants = adt
-        .variants
-        .iter()
-        .map(|variant| {
-            let fields = variant
-                .fields
-                .iter()
-                .enumerate()
-                .map(|(index, ty)| {
-                    Ok((
-                        adt_selector_name(&adt.name, &variant.name, index),
-                        ty.lower_to_chc(setting)?,
-                    ))
+impl ast::AdtDef {
+    fn lower_to_chc<P: LoweringPolicy>(&self) -> Result<Datatype> {
+        let variants = self
+            .variants
+            .iter()
+            .map(|variant| {
+                let fields = variant
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, ty)| {
+                        Ok((
+                            DatatypeVariant::selector_name(&self.name, &variant.name, index),
+                            ty.lower_to_chc::<P>()?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(DatatypeVariant {
+                    name: DatatypeVariant::constructor_name(&self.name, &variant.name),
+                    fields,
                 })
-                .collect::<Result<Vec<_>>>()?;
-            Ok(DatatypeVariant {
-                name: adt_constructor_name(&adt.name, &variant.name),
-                fields,
             })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Datatype {
+            name: Datatype::adt_type_name(&self.name),
+            variants,
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Datatype {
-        name: adt_type_name(&adt.name),
-        variants,
-    })
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LocalCtx {
     pub error_var: Term,
     pub time_var: Term,
 }
 
 impl ast::Type {
-    fn lower_to_chc(&self, setting: &Setting) -> Result<Type> {
+    fn chc_predicate_suffix(&self) -> String {
+        match self {
+            ast::Type::Int => "Int".to_string(),
+            ast::Type::Adt(name) => format!("Adt_{}", name),
+            ast::Type::Sender(payload) => format!("Sender_{}", payload.chc_predicate_suffix()),
+            ast::Type::Receiver(payload) => {
+                format!("Receiver_{}", payload.chc_predicate_suffix())
+            }
+            ast::Type::Func { params } => {
+                let params = params
+                    .iter()
+                    .map(ast::Type::chc_predicate_suffix)
+                    .collect::<Vec<_>>()
+                    .join("_");
+                format!("Func_{}", params)
+            }
+        }
+    }
+
+    fn closed_predicate_name(&self) -> PredicateName {
+        format!("{}${}", CLOSED_PREDICATE, self.chc_predicate_suffix())
+    }
+
+    fn closed_value_predicate_name(&self) -> PredicateName {
+        format!("{}Value${}", CLOSED_PREDICATE, self.chc_predicate_suffix())
+    }
+
+    fn needs_closed_value(&self) -> bool {
+        match self {
+            ast::Type::Sender(_) => true,
+            ast::Type::Receiver(payload) => payload.needs_closed_value(),
+            ast::Type::Adt(_) => true,
+            ast::Type::Int | ast::Type::Func { .. } => false,
+        }
+    }
+
+    fn closed_list_type<P: LoweringPolicy>(&self) -> Result<Type> {
+        Ok(Type::prophecy_for_policy::<P>(self.lower_to_chc::<P>()?))
+    }
+
+    fn lower_to_chc<P: LoweringPolicy>(&self) -> Result<Type> {
         Ok(match self {
             ast::Type::Int => Type::Int,
-            ast::Type::Adt(name) => Type::Adt(adt_type_name(name)),
+            ast::Type::Adt(name) => Type::Adt(Datatype::adt_type_name(name)),
             ast::Type::Sender(payload) | ast::Type::Receiver(payload) => {
-                Type::prophecy(setting.no_timestamps, payload.lower_to_chc(setting)?)
+                Type::prophecy_for_policy::<P>(payload.lower_to_chc::<P>()?)
             }
             ast::Type::Func { params } => {
                 let chc_params = params
                     .iter()
-                    .map(|p| p.lower_to_chc(setting))
+                    .map(|p| p.lower_to_chc::<P>())
                     .collect::<Result<Vec<_>>>()?;
                 Type::Func { args: chc_params }
             }
@@ -411,12 +1093,12 @@ impl ast::Type {
 }
 
 impl ast::Expr {
-    fn lower_to_chc(&self, ctx: &mut Ctx) -> Result<Term> {
+    fn lower_to_chc<P: LoweringPolicy>(&self, ctx: &mut Ctx<P>) -> Result<Term> {
         Ok(match self {
             ast::Expr::Num(n) => Term::Int(*n),
             ast::Expr::Var(var) => {
                 let ast_ty = ctx.get_ast_type(var)?.clone();
-                let chc_ty = ast_ty.lower_to_chc(&ctx.setting)?;
+                let chc_ty = ast_ty.lower_to_chc::<P>()?;
                 ctx.insert_declared_var(var.clone(), chc_ty)?
             }
             ast::Expr::Ctor {
@@ -429,7 +1111,7 @@ impl ast::Expr {
                     .map(|arg| arg.lower_to_chc(ctx))
                     .collect::<Result<Vec<_>>>()?;
                 Term::Ctor {
-                    name: adt_constructor_name(type_name, variant),
+                    name: DatatypeVariant::constructor_name(type_name, variant),
                     args,
                 }
             }
@@ -456,15 +1138,11 @@ static DEFAULT_ERROR_VAR: &str = "%b";
 static DEFAULT_TIME_VAR: &str = "%t";
 
 impl ast::FuncCall {
-    fn lower_to_chc(&self, ctx: &mut Ctx, lctx: &LocalCtx) -> Result<Body> {
+    fn lower_to_chc<P: LoweringPolicy>(&self, ctx: &mut Ctx<P>, lctx: &LocalCtx) -> Result<Body> {
         let ast::FuncCall { name, args } = self;
         let error_var = lctx.error_var.clone();
         let time_var = lctx.time_var.clone();
-        let default_args = if ctx.setting.no_timestamps {
-            vec![error_var]
-        } else {
-            vec![error_var, time_var]
-        };
+        let default_args = Term::predicate_args_for_policy::<P>(error_var, time_var);
         let args_term = args
             .iter()
             .map(|arg| arg.lower_to_chc(ctx))
@@ -480,26 +1158,21 @@ impl ast::FuncCall {
 }
 
 impl ast::Statement {
-    fn lower_to_chc(&self, ctx: &mut Ctx, lctx: &LocalCtx) -> Result<DisjunctiveBody> {
+    fn lower_to_chc<P: LoweringPolicy>(
+        &self,
+        ctx: &mut Ctx<P>,
+        lctx: &LocalCtx,
+    ) -> Result<DisjunctiveBody> {
         Ok(match self {
-            ast::Statement::Unit => {
-                if ctx.setting.is_deadlock_mode() {
-                    let mut body = ctx.terminal_closed_body()?;
-                    body.constraints.push(Constraint::Eq(
-                        lctx.error_var.clone(),
-                        ctx.setting.terminated_status(),
-                    ));
-                    vec![body]
-                } else {
-                    vec![]
-                }
-            }
+            ast::Statement::Unit => ctx.unit_bodies(lctx)?,
 
             ast::Statement::Fail => {
                 let mut body = ctx.terminal_closed_body()?;
                 let error_var = lctx.error_var.clone();
-                body.constraints
-                    .push(Constraint::Eq(error_var, ctx.setting.failure_status()));
+                body.constraints.push(Constraint::Eq(
+                    error_var,
+                    P::Check::status(CheckStatus::Failure),
+                ));
                 vec![body]
             }
             ast::Statement::Call(func_call) => {
@@ -526,10 +1199,10 @@ impl ast::Statement {
                 let after_type_env = ctx.separate_type_env(func_call)?;
                 let first_error_var = ctx.gen_new_var(DEFAULT_ERROR_VAR);
                 let first_error_term =
-                    ctx.insert_declared_var(&first_error_var, ctx.setting.status_type())?;
+                    ctx.insert_declared_var(&first_error_var, P::Check::status_type())?;
                 let second_error_var = ctx.gen_new_var(DEFAULT_ERROR_VAR);
                 let second_error_term =
-                    ctx.insert_declared_var(&second_error_var, ctx.setting.status_type())?;
+                    ctx.insert_declared_var(&second_error_var, P::Check::status_type())?;
 
                 let func_call_body = func_call.lower_to_chc(
                     ctx,
@@ -555,37 +1228,12 @@ impl ast::Statement {
                 ctx.type_env.extend(tmp_type_env);
 
                 let spawned_body = func_call_body.concat(func_call1_body);
-                if ctx.setting.is_deadlock_mode() {
-                    vec![
-                        Body {
-                            predicates: vec![],
-                            constraints: vec![
-                                Constraint::Le(first_error_term.clone(), second_error_term.clone()),
-                                Constraint::Eq(lctx.error_var.clone(), first_error_term.clone()),
-                            ],
-                        }
-                        .concat(spawned_body.clone()),
-                        Body {
-                            predicates: vec![],
-                            constraints: vec![
-                                Constraint::Le(second_error_term.clone(), first_error_term.clone()),
-                                Constraint::Eq(lctx.error_var.clone(), second_error_term),
-                            ],
-                        }
-                        .concat(spawned_body),
-                    ]
-                } else {
-                    vec![
-                        Body {
-                            predicates: vec![],
-                            constraints: vec![Constraint::Eq(
-                                lctx.error_var.clone(),
-                                Term::LOr(Box::new(first_error_term), Box::new(second_error_term)),
-                            )],
-                        }
-                        .concat(spawned_body),
-                    ]
-                }
+                Body::spawn_bodies_for_policy::<P>(
+                    lctx.error_var.clone(),
+                    first_error_term,
+                    second_error_term,
+                    spawned_body,
+                )
             }
             ast::Statement::New {
                 payload,
@@ -597,22 +1245,17 @@ impl ast::Statement {
                 let receiver_ty = ast::Type::receiver(payload.clone());
                 ctx.insert_to_type_env(sender, sender_ty.clone())?;
                 ctx.insert_to_type_env(receiver, receiver_ty.clone())?;
-                let payload_chc_ty = payload.lower_to_chc(&ctx.setting)?;
-                let sender_var =
-                    ctx.insert_declared_var(sender, sender_ty.lower_to_chc(&ctx.setting)?)?;
+                let payload_chc_ty = payload.lower_to_chc::<P>()?;
+                let sender_var = ctx.insert_declared_var(sender, sender_ty.lower_to_chc::<P>()?)?;
                 let receiver_var =
-                    ctx.insert_declared_var(receiver, receiver_ty.lower_to_chc(&ctx.setting)?)?;
+                    ctx.insert_declared_var(receiver, receiver_ty.lower_to_chc::<P>()?)?;
                 let (sorted_predicate, _) = ctx.primitive_predicates_for_payload(payload_chc_ty);
                 let body = body.lower_to_chc(ctx, lctx)?;
                 vec![body.concat(Body {
-                    predicates: if ctx.setting.no_timestamps {
-                        vec![]
-                    } else {
-                        vec![PredicateAtom {
-                            name: sorted_predicate,
-                            args: vec![sender_var.clone()],
-                        }]
-                    },
+                    predicates: PredicateAtom::sorted_new_for_policy::<P>(
+                        sorted_predicate,
+                        sender_var.clone(),
+                    ),
                     constraints: vec![Constraint::Eq(receiver_var, sender_var)],
                 })]
             }
@@ -621,38 +1264,24 @@ impl ast::Statement {
                 value,
                 body,
             } => {
-                let time_var = lctx.time_var.clone();
                 let sender_ty = ctx.get_ast_type(sender)?.clone();
-                let sender_chc_ty = sender_ty.lower_to_chc(&ctx.setting)?;
+                let sender_chc_ty = sender_ty.lower_to_chc::<P>()?;
                 let sender_var = ctx.insert_declared_var(sender, sender_chc_ty.clone())?;
-                let new_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
-                let new_time_term = ctx.insert_declared_var(&new_time_var, Type::Int)?;
                 let value_term = value.lower_to_chc(ctx)?;
-                let new_lctx = LocalCtx {
-                    error_var: lctx.error_var.clone(),
-                    time_var: new_time_term.clone(),
-                };
+                let (item_term, new_lctx, time_constraints) =
+                    ctx.send_item_and_lctx(lctx, value_term)?;
                 let mut body = body.lower_to_chc(ctx, &new_lctx)?;
                 let new_sender = ctx.gen_new_var(sender);
                 let new_sender_var = ctx.insert_declared_var(&new_sender, sender_chc_ty)?;
                 body.substitute(&HashMap::from([(sender.clone(), new_sender)]));
+                let mut constraints = vec![Constraint::Eq(
+                    sender_var,
+                    Term::Cons(item_term.into(), new_sender_var.into()),
+                )];
+                constraints.extend(time_constraints);
                 vec![body.concat(Body {
                     predicates: vec![],
-                    constraints: vec![
-                        Constraint::Eq(
-                            sender_var,
-                            Term::Cons(
-                                if ctx.setting.no_timestamps {
-                                    value_term.into()
-                                } else {
-                                    Term::Pair(new_time_term.clone().into(), value_term.into())
-                                        .into()
-                                },
-                                new_sender_var.into(),
-                            ),
-                        ),
-                        Constraint::Le(time_var, new_time_term),
-                    ],
+                    constraints,
                 })]
             }
             ast::Statement::Recv {
@@ -661,53 +1290,29 @@ impl ast::Statement {
                 body,
             } => {
                 let type_env_before_recv = ctx.type_env.clone();
-                let new_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
-                let new_time_term = ctx.insert_declared_var(&new_time_var, Type::Int)?;
-                let tmp_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
-                let tmp_time_term = ctx.insert_declared_var(&tmp_time_var, Type::Int)?;
                 let receiver_ty = ctx.get_ast_type(receiver)?.clone();
                 let payload_ty = receiver_ty
                     .payload()
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("Variable {} is not a receiver", receiver))?;
                 ctx.type_env.insert(var.clone(), payload_ty.clone());
-                let mut body = body.lower_to_chc(
-                    ctx,
-                    &LocalCtx {
-                        error_var: lctx.error_var.clone(),
-                        time_var: new_time_term.clone(),
-                    },
-                )?;
-                let receiver_chc_ty = receiver_ty.lower_to_chc(&ctx.setting)?;
-                let var_term =
-                    ctx.insert_declared_var(var, payload_ty.lower_to_chc(&ctx.setting)?)?;
+                let recv_lctx = ctx.recv_lctx(lctx)?;
+                let mut body = body.lower_to_chc(ctx, &recv_lctx)?;
+                let receiver_chc_ty = receiver_ty.lower_to_chc::<P>()?;
+                let var_term = ctx.insert_declared_var(var, payload_ty.lower_to_chc::<P>()?)?;
+                let (item_term, time_constraints) =
+                    ctx.recv_item_and_constraints(lctx, &recv_lctx, var_term)?;
                 let receiver_term = ctx.insert_declared_var(receiver, receiver_chc_ty.clone())?;
                 let new_receiver = ctx.gen_new_var(receiver);
                 let new_receiver_term =
                     ctx.insert_declared_var(&new_receiver, receiver_chc_ty.clone())?;
                 body.substitute(&HashMap::from([(receiver.clone(), new_receiver)]));
 
-                let time_constraints = if ctx.setting.no_timestamps {
-                    vec![]
-                } else {
-                    vec![
-                        Constraint::Lt(tmp_time_term.clone(), new_time_term.clone()),
-                        Constraint::Le(lctx.time_var.clone(), new_time_term.clone()),
-                    ]
-                };
-
                 let normal_body = Body {
                     predicates: vec![],
                     constraints: vec![Constraint::Eq(
                         receiver_term.clone(),
-                        Term::Cons(
-                            if ctx.setting.no_timestamps {
-                                var_term.into()
-                            } else {
-                                Term::Pair(tmp_time_term.clone().into(), var_term.into()).into()
-                            },
-                            new_receiver_term.clone().into(),
-                        ),
+                        Term::Cons(item_term.into(), new_receiver_term.clone().into()),
                     )],
                 }
                 .concat(Body {
@@ -716,19 +1321,13 @@ impl ast::Statement {
                 })
                 .concat(body);
 
-                if ctx.setting.is_deadlock_mode() {
-                    let type_env_after_recv =
-                        std::mem::replace(&mut ctx.type_env, type_env_before_recv);
-                    let mut blocked_body = ctx.terminal_closed_body()?;
-                    ctx.type_env = type_env_after_recv;
-                    blocked_body.constraints.extend([
-                        Constraint::Eq(receiver_term, Term::Nil(receiver_chc_ty)),
-                        Constraint::Eq(lctx.error_var.clone(), ctx.setting.blocked_status()),
-                    ]);
-                    vec![normal_body, blocked_body]
-                } else {
-                    vec![normal_body]
-                }
+                ctx.recv_bodies(
+                    lctx,
+                    normal_body,
+                    receiver_term,
+                    receiver_chc_ty,
+                    type_env_before_recv,
+                )?
             }
             ast::Statement::Match { scrutinee, arms } => {
                 let scrutinee_ty = ctx.get_ast_type(scrutinee)?.clone();
@@ -740,7 +1339,7 @@ impl ast::Statement {
                     .get(type_name)
                     .ok_or_else(|| anyhow::anyhow!("unknown ADT type {}", type_name))?
                     .clone();
-                let scrutinee_chc_ty = scrutinee_ty.lower_to_chc(&ctx.setting)?;
+                let scrutinee_chc_ty = scrutinee_ty.lower_to_chc::<P>()?;
                 let scrutinee_term =
                     ctx.insert_declared_var(scrutinee, scrutinee_chc_ty.clone())?;
                 let base_type_env = ctx.type_env.clone();
@@ -795,7 +1394,7 @@ impl ast::Statement {
                             let fresh_var = arm_var_map
                                 .get(var)
                                 .expect("fresh variable should exist for arm binding");
-                            ctx.insert_declared_var(fresh_var, field_ty.lower_to_chc(&ctx.setting)?)
+                            ctx.insert_declared_var(fresh_var, field_ty.lower_to_chc::<P>()?)
                         })
                         .collect::<Result<Vec<_>>>()?;
                     bodies.push(
@@ -804,7 +1403,10 @@ impl ast::Statement {
                             constraints: vec![Constraint::Eq(
                                 scrutinee_term.clone(),
                                 Term::Ctor {
-                                    name: adt_constructor_name(type_name, &arm.variant),
+                                    name: DatatypeVariant::constructor_name(
+                                        type_name,
+                                        &arm.variant,
+                                    ),
                                     args: field_terms.clone(),
                                 },
                             )],
@@ -823,8 +1425,8 @@ impl ast::Statement {
                     .cloned()
                     .ok_or_else(|| anyhow::anyhow!("Variable {} is not a sender", sender))?;
                 let (_, merge_predicate) =
-                    ctx.primitive_predicates_for_payload(payload_ty.lower_to_chc(&ctx.setting)?);
-                let sender_chc_ty = sender_ty.lower_to_chc(&ctx.setting)?;
+                    ctx.primitive_predicates_for_payload(payload_ty.lower_to_chc::<P>()?);
+                let sender_chc_ty = sender_ty.lower_to_chc::<P>()?;
                 let sender_term = ctx.insert_declared_var(sender, sender_chc_ty.clone())?;
                 let new_sender_var = ctx.gen_new_var(sender);
                 let new_sender_term =
@@ -849,13 +1451,13 @@ impl ast::Statement {
 }
 
 impl ast::Function {
-    fn lower_to_chc(&self, ctx: &mut Ctx) -> Result<Vec<Clause>> {
+    fn lower_to_chc<P: LoweringPolicy>(&self, ctx: &mut Ctx<P>) -> Result<Vec<Clause>> {
         let mut clauses = vec![];
-        let error_var = ctx.insert_declared_var(DEFAULT_ERROR_VAR, ctx.setting.status_type())?;
-        let time_var = ctx.insert_declared_var(DEFAULT_TIME_VAR, Type::Int)?;
+        let error_var = ctx.insert_declared_var(DEFAULT_ERROR_VAR, P::Check::status_type())?;
+        let time_var = ctx.initial_time_var()?;
 
         for (param_name, param_type) in &self.params {
-            let chc_type = param_type.lower_to_chc(&ctx.setting)?;
+            let chc_type = param_type.lower_to_chc::<P>()?;
             ctx.insert_to_type_env(param_name, param_type.clone())?;
             ctx.insert_declared_var(param_name.clone(), chc_type)?;
         }
@@ -866,24 +1468,11 @@ impl ast::Function {
             .map(|(param_name, _)| Term::Var(param_name.clone()))
             .collect::<Vec<Term>>();
 
-        if !ctx.setting.is_deadlock_mode() {
-            clauses.push(Clause {
-                forall: ctx.var_declarations.clone().into_iter().collect(),
-                head: Some(PredicateAtom {
-                    name: self.name.clone(),
-                    args: [
-                        if ctx.setting.no_timestamps {
-                            vec![ctx.setting.terminated_status()]
-                        } else {
-                            vec![ctx.setting.terminated_status(), time_var.clone()]
-                        },
-                        param_terms.clone(),
-                    ]
-                    .concat(),
-                }),
-                body: ctx.terminal_closed_body()?,
-            });
-        }
+        clauses.extend(ctx.synthetic_termination_clauses(
+            &self.name,
+            time_var.clone(),
+            &param_terms,
+        )?);
 
         let lctx = LocalCtx {
             error_var: error_var.clone(),
@@ -898,11 +1487,7 @@ impl ast::Function {
                 head: Some(PredicateAtom {
                     name: self.name.clone(),
                     args: [
-                        if ctx.setting.no_timestamps {
-                            vec![error_var.clone()]
-                        } else {
-                            vec![error_var.clone(), time_var.clone()]
-                        },
+                        Term::predicate_args_for_policy::<P>(error_var.clone(), time_var.clone()),
                         param_terms.clone(),
                     ]
                     .concat(),
@@ -917,20 +1502,38 @@ impl ast::Function {
 
 impl ast::Program {
     pub fn lower_to_chc(&self, setting: Setting) -> Result<CHC> {
+        if setting.no_timestamps {
+            self.lower_to_chc_with_time::<Untimestamped>(setting)
+        } else {
+            self.lower_to_chc_with_time::<Timestamped>(setting)
+        }
+    }
+
+    fn lower_to_chc_with_time<T: TimeEncoding>(&self, setting: Setting) -> Result<CHC> {
+        match setting.check_mode {
+            CheckMode::FailReachability => {
+                self.lower_to_chc_with_policy::<Policy<T, FailReachabilityCheck>>(setting)
+            }
+            CheckMode::DeadlockFreedom => {
+                self.lower_to_chc_with_policy::<Policy<T, DeadlockFreedomCheck>>(setting)
+            }
+        }
+    }
+
+    fn lower_to_chc_with_policy<P: LoweringPolicy>(&self, setting: Setting) -> Result<CHC> {
         let mut chc = CHC::init_premitive(&setting);
         chc.datatypes = self
             .adts
             .iter()
-            .map(|adt| lower_datatype_def(adt, &setting))
+            .map(ast::AdtDef::lower_to_chc::<P>)
             .collect::<Result<Vec<_>>>()?;
-        let mut ctx = Ctx {
+        let mut ctx: Ctx<P> = Ctx {
             fun_declarations: chc.fun_declarations.clone(),
             adts: self
                 .adts
                 .iter()
                 .map(|adt| (adt.name.clone(), adt.clone()))
                 .collect(),
-            setting,
             ..Default::default()
         };
         let func_type_env: HashMap<ast::VarName, ast::Type> = self
@@ -950,15 +1553,11 @@ impl ast::Program {
             ctx.type_env = func_type_env.clone();
             ctx.var_declarations.clear();
             let predicate_args = {
-                let mut params = if ctx.setting.no_timestamps {
-                    vec![ctx.setting.status_type()]
-                } else {
-                    vec![ctx.setting.status_type(), Type::Int]
-                };
+                let mut params = Type::predicate_args_for_policy::<P>(P::Check::status_type());
                 params.extend(
                     func.params
                         .iter()
-                        .map(|(_, ty)| ty.lower_to_chc(&ctx.setting))
+                        .map(|(_, ty)| ty.lower_to_chc::<P>())
                         .collect::<Result<Vec<_>>>()?,
                 );
                 params
@@ -980,8 +1579,8 @@ impl ast::Program {
             ctx.var_declarations.insert(free_var, Type::Int);
         }
 
-        let time_var = ctx.insert_declared_var(DEFAULT_TIME_VAR, Type::Int)?;
-        let init_query_status = ctx.setting.init_query_status();
+        let time_var = ctx.initial_time_var()?;
+        let init_query_status = P::Check::status(CheckStatus::InitQuery);
 
         let init_body = self.init.lower_to_chc(
             &mut ctx,
@@ -999,7 +1598,7 @@ impl ast::Program {
 
         for payload_ty in ctx.primitive_payload_types.clone() {
             chc.clauses
-                .extend(CHC::primitive_clauses(&ctx.setting, payload_ty));
+                .extend(CHC::primitive_clauses_for_policy::<P>(payload_ty));
         }
 
         for payload in ctx.closed_payload_types.clone() {
@@ -1015,7 +1614,7 @@ impl ast::Program {
             clauses: chc.clauses,
             fun_declarations: ctx.fun_declarations,
             datatypes: chc.datatypes,
-            setting: ctx.setting,
+            setting,
         })
     }
 }
@@ -1030,6 +1629,126 @@ mod tests {
             no_timestamps,
             check_mode: CheckMode::DeadlockFreedom,
         }
+    }
+
+    #[test]
+    fn setting_dispatch_selects_time_and_check_axes_independently() {
+        let program = parser::parse_program(
+            r#"
+            init = main()
+
+            main() = new s, r in done(s, r)
+            done(s: Sender, r: Receiver) = ()
+            "#,
+        )
+        .expect("program should parse");
+        let timestamped_channel = Type::Lst(Box::new(Type::timestamped_value(Type::Int)));
+        let untimestamped_channel = Type::Lst(Box::new(Type::Int));
+
+        let timestamped_fail = program
+            .lower_to_chc(Setting {
+                no_timestamps: false,
+                check_mode: CheckMode::FailReachability,
+            })
+            .expect("program should lower");
+        assert_eq!(
+            timestamped_fail.fun_declarations["done"],
+            vec![
+                Type::Bool,
+                Type::Int,
+                timestamped_channel.clone(),
+                timestamped_channel.clone()
+            ]
+        );
+
+        let untimestamped_fail = program
+            .lower_to_chc(Setting {
+                no_timestamps: true,
+                check_mode: CheckMode::FailReachability,
+            })
+            .expect("program should lower");
+        assert_eq!(
+            untimestamped_fail.fun_declarations["done"],
+            vec![
+                Type::Bool,
+                untimestamped_channel.clone(),
+                untimestamped_channel.clone()
+            ]
+        );
+
+        let timestamped_deadlock = program
+            .lower_to_chc(Setting {
+                no_timestamps: false,
+                check_mode: CheckMode::DeadlockFreedom,
+            })
+            .expect("program should lower");
+        assert_eq!(
+            timestamped_deadlock.fun_declarations["done"],
+            vec![
+                Type::Int,
+                Type::Int,
+                timestamped_channel.clone(),
+                timestamped_channel
+            ]
+        );
+
+        let untimestamped_deadlock = program
+            .lower_to_chc(Setting {
+                no_timestamps: true,
+                check_mode: CheckMode::DeadlockFreedom,
+            })
+            .expect("program should lower");
+        assert_eq!(
+            untimestamped_deadlock.fun_declarations["done"],
+            vec![
+                Type::Int,
+                untimestamped_channel.clone(),
+                untimestamped_channel
+            ]
+        );
+    }
+
+    #[test]
+    fn no_timestamp_send_and_recv_do_not_allocate_fresh_time_vars() {
+        let program = parser::parse_program(
+            r#"
+            init = main()
+
+            main() = new s, r in write(s, r)
+            write(s: Sender, r: Receiver) = send 1 to s; read(s, r)
+            read(s: Sender, r: Receiver) = let v = recv r in done(s, r, v)
+            done(s: Sender, r: Receiver, v: int) = fail
+            "#,
+        )
+        .expect("program should parse");
+
+        let timestamped = program
+            .lower_to_chc(Setting {
+                no_timestamps: false,
+                check_mode: CheckMode::FailReachability,
+            })
+            .expect("program should lower");
+        assert!(
+            timestamped
+                .clauses
+                .iter()
+                .any(|clause| { clause.forall.iter().any(|(var, _)| var.starts_with("%t%")) }),
+            "timestamped lowering should allocate fresh time variables"
+        );
+
+        let untimestamped = program
+            .lower_to_chc(Setting {
+                no_timestamps: true,
+                check_mode: CheckMode::FailReachability,
+            })
+            .expect("program should lower");
+        assert!(
+            !untimestamped
+                .clauses
+                .iter()
+                .any(|clause| { clause.forall.iter().any(|(var, _)| var.starts_with("%t")) }),
+            "untimestamped lowering should not declare time variables"
+        );
     }
 
     #[test]
