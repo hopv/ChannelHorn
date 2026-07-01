@@ -489,10 +489,8 @@ impl ast::Statement {
             ast::Statement::Fail => {
                 let mut body = ctx.terminal_closed_body()?;
                 let error_var = lctx.error_var.clone();
-                body.constraints.push(Constraint::Eq(
-                    error_var,
-                    Term::Bool(matches!(self, ast::Statement::Fail)),
-                ));
+                body.constraints
+                    .push(Constraint::Eq(error_var, ctx.setting.failure_status()));
                 vec![body]
             }
             ast::Statement::Call(func_call) => {
@@ -518,9 +516,11 @@ impl ast::Statement {
             ast::Statement::Spawn(func_call, func_call1) => {
                 let after_type_env = ctx.separate_type_env(func_call)?;
                 let first_error_var = ctx.gen_new_var(DEFAULT_ERROR_VAR);
-                let first_error_term = ctx.insert_declared_var(&first_error_var, Type::Bool)?;
+                let first_error_term =
+                    ctx.insert_declared_var(&first_error_var, ctx.setting.status_type())?;
                 let second_error_var = ctx.gen_new_var(DEFAULT_ERROR_VAR);
-                let second_error_term = ctx.insert_declared_var(&second_error_var, Type::Bool)?;
+                let second_error_term =
+                    ctx.insert_declared_var(&second_error_var, ctx.setting.status_type())?;
 
                 let func_call_body = func_call.lower_to_chc(
                     ctx,
@@ -545,16 +545,38 @@ impl ast::Statement {
 
                 ctx.type_env.extend(tmp_type_env);
 
-                vec![
-                    Body {
-                        predicates: vec![],
-                        constraints: vec![Constraint::Eq(
-                            lctx.error_var.clone(),
-                            Term::LOr(Box::new(first_error_term), Box::new(second_error_term)),
-                        )],
-                    }
-                    .concat(func_call_body.concat(func_call1_body)),
-                ]
+                let spawned_body = func_call_body.concat(func_call1_body);
+                if ctx.setting.is_deadlock_mode() {
+                    vec![
+                        Body {
+                            predicates: vec![],
+                            constraints: vec![
+                                Constraint::Le(first_error_term.clone(), second_error_term.clone()),
+                                Constraint::Eq(lctx.error_var.clone(), first_error_term.clone()),
+                            ],
+                        }
+                        .concat(spawned_body.clone()),
+                        Body {
+                            predicates: vec![],
+                            constraints: vec![
+                                Constraint::Le(second_error_term.clone(), first_error_term.clone()),
+                                Constraint::Eq(lctx.error_var.clone(), second_error_term),
+                            ],
+                        }
+                        .concat(spawned_body),
+                    ]
+                } else {
+                    vec![
+                        Body {
+                            predicates: vec![],
+                            constraints: vec![Constraint::Eq(
+                                lctx.error_var.clone(),
+                                Term::LOr(Box::new(first_error_term), Box::new(second_error_term)),
+                            )],
+                        }
+                        .concat(spawned_body),
+                    ]
+                }
             }
             ast::Statement::New {
                 payload,
@@ -629,6 +651,7 @@ impl ast::Statement {
                 var,
                 body,
             } => {
+                let type_env_before_recv = ctx.type_env.clone();
                 let new_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
                 let new_time_term = ctx.insert_declared_var(&new_time_var, Type::Int)?;
                 let tmp_time_var = ctx.gen_new_var(DEFAULT_TIME_VAR);
@@ -651,7 +674,8 @@ impl ast::Statement {
                     ctx.insert_declared_var(var, payload_ty.lower_to_chc(&ctx.setting)?)?;
                 let receiver_term = ctx.insert_declared_var(receiver, receiver_chc_ty.clone())?;
                 let new_receiver = ctx.gen_new_var(receiver);
-                let new_receiver_term = ctx.insert_declared_var(&new_receiver, receiver_chc_ty)?;
+                let new_receiver_term =
+                    ctx.insert_declared_var(&new_receiver, receiver_chc_ty.clone())?;
                 body.substitute(&HashMap::from([(receiver.clone(), new_receiver)]));
 
                 let time_constraints = if ctx.setting.no_timestamps {
@@ -663,27 +687,39 @@ impl ast::Statement {
                     ]
                 };
 
-                vec![
-                    Body {
-                        predicates: vec![],
-                        constraints: vec![Constraint::Eq(
-                            receiver_term,
-                            Term::Cons(
-                                if ctx.setting.no_timestamps {
-                                    var_term.into()
-                                } else {
-                                    Term::Pair(tmp_time_term.clone().into(), var_term.into()).into()
-                                },
-                                new_receiver_term.clone().into(),
-                            ),
-                        )],
-                    }
-                    .concat(Body {
-                        predicates: vec![],
-                        constraints: time_constraints,
-                    })
-                    .concat(body),
-                ]
+                let normal_body = Body {
+                    predicates: vec![],
+                    constraints: vec![Constraint::Eq(
+                        receiver_term.clone(),
+                        Term::Cons(
+                            if ctx.setting.no_timestamps {
+                                var_term.into()
+                            } else {
+                                Term::Pair(tmp_time_term.clone().into(), var_term.into()).into()
+                            },
+                            new_receiver_term.clone().into(),
+                        ),
+                    )],
+                }
+                .concat(Body {
+                    predicates: vec![],
+                    constraints: time_constraints,
+                })
+                .concat(body);
+
+                if ctx.setting.is_deadlock_mode() {
+                    let type_env_after_recv =
+                        std::mem::replace(&mut ctx.type_env, type_env_before_recv);
+                    let mut blocked_body = ctx.terminal_closed_body()?;
+                    ctx.type_env = type_env_after_recv;
+                    blocked_body.constraints.extend([
+                        Constraint::Eq(receiver_term, Term::Nil(receiver_chc_ty)),
+                        Constraint::Eq(lctx.error_var.clone(), ctx.setting.blocked_status()),
+                    ]);
+                    vec![normal_body, blocked_body]
+                } else {
+                    vec![normal_body]
+                }
             }
             ast::Statement::Match { scrutinee, arms } => {
                 let scrutinee_ty = ctx.get_ast_type(scrutinee)?.clone();
@@ -806,7 +842,7 @@ impl ast::Statement {
 impl ast::Function {
     fn lower_to_chc(&self, ctx: &mut Ctx) -> Result<Vec<Clause>> {
         let mut clauses = vec![];
-        let error_var = ctx.insert_declared_var(DEFAULT_ERROR_VAR, Type::Bool)?;
+        let error_var = ctx.insert_declared_var(DEFAULT_ERROR_VAR, ctx.setting.status_type())?;
         let time_var = ctx.insert_declared_var(DEFAULT_TIME_VAR, Type::Int)?;
 
         for (param_name, param_type) in &self.params {
@@ -827,9 +863,9 @@ impl ast::Function {
                 name: self.name.clone(),
                 args: [
                     if ctx.setting.no_timestamps {
-                        vec![Term::Bool(false)]
+                        vec![ctx.setting.terminated_status()]
                     } else {
-                        vec![Term::Bool(false), time_var.clone()]
+                        vec![ctx.setting.terminated_status(), time_var.clone()]
                     },
                     param_terms.clone(),
                 ]
@@ -904,9 +940,9 @@ impl ast::Program {
             ctx.var_declarations.clear();
             let predicate_args = {
                 let mut params = if ctx.setting.no_timestamps {
-                    vec![Type::Bool]
+                    vec![ctx.setting.status_type()]
                 } else {
-                    vec![Type::Bool, Type::Int]
+                    vec![ctx.setting.status_type(), Type::Int]
                 };
                 params.extend(
                     func.params
@@ -934,11 +970,12 @@ impl ast::Program {
         }
 
         let time_var = ctx.insert_declared_var(DEFAULT_TIME_VAR, Type::Int)?;
+        let init_query_status = ctx.setting.init_query_status();
 
         let init_body = self.init.lower_to_chc(
             &mut ctx,
             &LocalCtx {
-                error_var: Term::Bool(true),
+                error_var: init_query_status,
                 time_var: time_var.clone(),
             },
         )?;
@@ -975,7 +1012,14 @@ impl ast::Program {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::parser;
+    use crate::{chc::CheckMode, core::parser};
+
+    fn deadlock_setting(no_timestamps: bool) -> Setting {
+        Setting {
+            no_timestamps,
+            check_mode: CheckMode::DeadlockFreedom,
+        }
+    }
 
     #[test]
     fn monomorphizes_primitives_for_channel_payloads() {
@@ -993,6 +1037,7 @@ mod tests {
         let chc = program
             .lower_to_chc(Setting {
                 no_timestamps: false,
+                ..Setting::default()
             })
             .expect("program should lower");
 
@@ -1019,6 +1064,7 @@ mod tests {
         let chc = program
             .lower_to_chc(Setting {
                 no_timestamps: false,
+                ..Setting::default()
             })
             .expect("program should lower");
         let recursive_closed_clause = chc
@@ -1065,6 +1111,7 @@ mod tests {
         let chc = program
             .lower_to_chc(Setting {
                 no_timestamps: false,
+                ..Setting::default()
             })
             .expect("program should lower");
         let output = chc.to_string();
@@ -1100,7 +1147,187 @@ mod tests {
         program
             .lower_to_chc(Setting {
                 no_timestamps: false,
+                ..Setting::default()
             })
             .expect("program should lower without arm binding conflicts");
+    }
+
+    #[test]
+    fn deadlock_mode_uses_int_status_without_status_datatypes() {
+        let program = parser::parse_program(
+            r#"
+            init = main()
+
+            main() = ()
+            "#,
+        )
+        .expect("program should parse");
+
+        let chc = program
+            .lower_to_chc(deadlock_setting(false))
+            .expect("program should lower");
+
+        assert_eq!(chc.fun_declarations["main"][0], Type::Int);
+        let output = chc.to_string();
+        assert!(!output.contains("Status"), "{output}");
+        assert!(!output.contains("Join"), "{output}");
+    }
+
+    #[test]
+    fn deadlock_recv_emits_normal_and_blocked_clauses() {
+        let program = parser::parse_program(
+            r#"
+            init = main()
+
+            main() = new s, r in read(s, r)
+            read(s: Sender, r: Receiver) = let v = recv r in done(s, r)
+            done(s: Sender, r: Receiver) = ()
+            "#,
+        )
+        .expect("program should parse");
+
+        let chc = program
+            .lower_to_chc(deadlock_setting(false))
+            .expect("program should lower");
+        let read_clauses = chc
+            .clauses
+            .iter()
+            .filter(|clause| clause.head.as_ref().is_some_and(|head| head.name == "read"))
+            .collect::<Vec<_>>();
+
+        assert!(read_clauses.iter().any(|clause| {
+            clause.body.constraints.iter().any(|constraint| {
+                matches!(
+                    constraint,
+                    Constraint::Eq(Term::Var(receiver), Term::Cons(_, _))
+                        if receiver == "r"
+                )
+            })
+        }));
+        assert!(read_clauses.iter().any(|clause| {
+            let has_blocked_status = clause.body.constraints.iter().any(|constraint| {
+                matches!(
+                    constraint,
+                    Constraint::Eq(Term::Var(status), Term::Int(0))
+                        if status == DEFAULT_ERROR_VAR
+                )
+            });
+            let has_nil_receiver = clause.body.constraints.iter().any(|constraint| {
+                matches!(
+                    constraint,
+                    Constraint::Eq(Term::Var(receiver), Term::Nil(_))
+                        if receiver == "r"
+                )
+            });
+            let closes_sender = clause.body.constraints.iter().any(|constraint| {
+                matches!(
+                    constraint,
+                    Constraint::Eq(Term::Var(sender), Term::Nil(_))
+                        if sender == "s"
+                )
+            });
+
+            has_blocked_status && has_nil_receiver && closes_sender
+        }));
+    }
+
+    #[test]
+    fn deadlock_spawn_lowers_status_join_to_min_clauses() {
+        let program = parser::parse_program(
+            r#"
+            init = main()
+
+            main() = spawn(left()); right()
+            left() = ()
+            right() = ()
+            "#,
+        )
+        .expect("program should parse");
+
+        let chc = program
+            .lower_to_chc(deadlock_setting(false))
+            .expect("program should lower");
+        let spawn_clauses = chc
+            .clauses
+            .iter()
+            .filter(|clause| {
+                clause.head.as_ref().is_some_and(|head| head.name == "main")
+                    && clause
+                        .body
+                        .constraints
+                        .iter()
+                        .any(|constraint| matches!(constraint, Constraint::Le(_, _)))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(spawn_clauses.len(), 2);
+        assert!(spawn_clauses.iter().any(|clause| {
+            clause.body.constraints.iter().any(|constraint| {
+                matches!(
+                    constraint,
+                    Constraint::Le(Term::Var(first), Term::Var(second))
+                        if first == "%b%0" && second == "%b%1"
+                )
+            }) && clause.body.constraints.iter().any(|constraint| {
+                matches!(
+                    constraint,
+                    Constraint::Eq(Term::Var(status), Term::Var(first))
+                        if status == DEFAULT_ERROR_VAR && first == "%b%0"
+                )
+            })
+        }));
+        assert!(spawn_clauses.iter().any(|clause| {
+            clause.body.constraints.iter().any(|constraint| {
+                matches!(
+                    constraint,
+                    Constraint::Le(Term::Var(second), Term::Var(first))
+                        if second == "%b%1" && first == "%b%0"
+                )
+            }) && clause.body.constraints.iter().any(|constraint| {
+                matches!(
+                    constraint,
+                    Constraint::Eq(Term::Var(status), Term::Var(second))
+                        if status == DEFAULT_ERROR_VAR && second == "%b%1"
+                )
+            })
+        }));
+    }
+
+    #[test]
+    fn deadlock_no_timestamps_recv_still_emits_blocked_clause() {
+        let program = parser::parse_program(
+            r#"
+            init = main()
+
+            main() = new s, r in read(s, r)
+            read(s: Sender, r: Receiver) = let v = recv r in done(s, r)
+            done(s: Sender, r: Receiver) = ()
+            "#,
+        )
+        .expect("program should parse");
+
+        let chc = program
+            .lower_to_chc(deadlock_setting(true))
+            .expect("program should lower");
+
+        assert!(chc.clauses.iter().any(|clause| {
+            clause.head.as_ref().is_some_and(|head| head.name == "read")
+                && clause.body.constraints.iter().any(|constraint| {
+                    matches!(
+                        constraint,
+                        Constraint::Eq(
+                            Term::Var(receiver),
+                            Term::Nil(Type::Lst(inner))
+                        ) if receiver == "r" && **inner == Type::Int
+                    )
+                })
+                && clause.body.constraints.iter().any(|constraint| {
+                    matches!(
+                        constraint,
+                        Constraint::Eq(Term::Var(status), Term::Int(0))
+                            if status == DEFAULT_ERROR_VAR
+                    )
+                })
+        }));
     }
 }

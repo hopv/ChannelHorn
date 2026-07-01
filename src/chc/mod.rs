@@ -186,9 +186,71 @@ impl Body {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CheckMode {
+    #[default]
+    FailReachability,
+    DeadlockFreedom,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Setting {
     pub no_timestamps: bool,
+    pub check_mode: CheckMode,
+}
+
+impl Setting {
+    pub fn status_type(&self) -> Type {
+        status_type(self)
+    }
+
+    pub fn failure_status(&self) -> Term {
+        match self.check_mode {
+            CheckMode::FailReachability => Term::Bool(true),
+            CheckMode::DeadlockFreedom => status_fail(),
+        }
+    }
+
+    pub fn blocked_status(&self) -> Term {
+        status_blocked()
+    }
+
+    pub fn terminated_status(&self) -> Term {
+        match self.check_mode {
+            CheckMode::FailReachability => Term::Bool(false),
+            CheckMode::DeadlockFreedom => status_terminated(),
+        }
+    }
+
+    pub fn init_query_status(&self) -> Term {
+        match self.check_mode {
+            CheckMode::FailReachability => Term::Bool(true),
+            CheckMode::DeadlockFreedom => status_blocked(),
+        }
+    }
+
+    pub fn is_deadlock_mode(&self) -> bool {
+        matches!(self.check_mode, CheckMode::DeadlockFreedom)
+    }
+}
+
+pub fn status_fail() -> Term {
+    Term::Int(-1)
+}
+
+pub fn status_blocked() -> Term {
+    Term::Int(0)
+}
+
+pub fn status_terminated() -> Term {
+    Term::Int(1)
+}
+
+pub fn status_type(setting: &Setting) -> Type {
+    match setting.check_mode {
+        CheckMode::FailReachability => Type::Bool,
+        CheckMode::DeadlockFreedom => Type::Int,
+    }
 }
 
 #[derive(Debug, Clone)]

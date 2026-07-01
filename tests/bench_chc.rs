@@ -4,7 +4,10 @@ use std::{
     process::{Command, Output},
 };
 
-use channel_rust_impl::{chc::Setting, parser};
+use channel_rust_impl::{
+    chc::{CheckMode, Setting},
+    parser,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SolverResult {
@@ -68,6 +71,7 @@ fn sat_benchmarks_are_sat() {
                 solver: Solver::Z3,
             },
         ],
+        Setting::default(),
     );
 }
 
@@ -79,6 +83,37 @@ fn unsat_benchmarks_are_unsat() {
         &[],
         Solver::Z3,
         &[],
+        Setting::default(),
+    );
+}
+
+#[test]
+fn deadlock_free_benchmarks_are_sat() {
+    run_benchmarks(
+        "tests/deadlock/sat",
+        &[SolverResult::Sat],
+        &[],
+        Solver::Z3,
+        &[],
+        Setting {
+            no_timestamps: false,
+            check_mode: CheckMode::DeadlockFreedom,
+        },
+    );
+}
+
+#[test]
+fn deadlock_benchmarks_are_unsat() {
+    run_benchmarks(
+        "tests/deadlock/unsat",
+        &[SolverResult::Unsat],
+        &[],
+        Solver::Z3,
+        &[],
+        Setting {
+            no_timestamps: false,
+            check_mode: CheckMode::DeadlockFreedom,
+        },
     );
 }
 
@@ -88,6 +123,7 @@ fn run_benchmarks(
     excluded_dirs: &[&str],
     default_solver: Solver,
     solver_overrides: &[SolverOverride],
+    setting: Setting,
 ) {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let root = manifest_dir.join(root);
@@ -107,7 +143,7 @@ fn run_benchmarks(
     let mut failures = Vec::new();
     for case in cases {
         let solver = solver_for_case(&case, default_solver, solver_overrides);
-        if let Err(failure) = run_benchmark(manifest_dir, &case, expected, solver) {
+        if let Err(failure) = run_benchmark(manifest_dir, &case, expected, solver, &setting) {
             failures.push(failure);
         }
     }
@@ -173,6 +209,7 @@ fn run_benchmark(
     benchmark_path: &Path,
     expected: &[SolverResult],
     solver: Solver,
+    setting: &Setting,
 ) -> Result<(), String> {
     let rel_path = benchmark_path
         .strip_prefix(manifest_dir)
@@ -183,9 +220,7 @@ fn run_benchmark(
     let program = parser::parse_program(&input)
         .map_err(|err| format!("{rel_path}: failed to parse benchmark: {err}"))?;
     let chc = program
-        .lower_to_chc(Setting {
-            no_timestamps: false,
-        })
+        .lower_to_chc(setting.clone())
         .map_err(|err| format!("{rel_path}: failed to lower benchmark to CHC: {err}"))?;
 
     let temp_dir = env::temp_dir().join(format!(

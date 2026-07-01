@@ -13,6 +13,7 @@ impl fmt::Display for Term {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Term::Var(v) => write!(f, "%{}", v),
+            Term::Int(i) if *i < 0 => write!(f, "(- {})", i.unsigned_abs()),
             Term::Int(i) => write!(f, "{}", i),
             Term::Ctor { name, args } if args.is_empty() => write!(f, "{}", name),
             Term::Ctor { name, args } => {

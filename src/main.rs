@@ -13,6 +13,9 @@ struct Args {
     #[arg(long, default_value_t = false)]
     no_timestamps: bool,
 
+    #[arg(long, default_value_t = false)]
+    deadlock: bool,
+
     #[arg(short, long)]
     exec: bool,
 
@@ -56,6 +59,11 @@ fn main() -> Result<()> {
 
     let output_chc = ast.lower_to_chc(chc::Setting {
         no_timestamps: args.no_timestamps,
+        check_mode: if args.deadlock {
+            chc::CheckMode::DeadlockFreedom
+        } else {
+            chc::CheckMode::FailReachability
+        },
     })?;
 
     if let Some(output_filename) = args.output {
