@@ -1,0 +1,15 @@
+let s, r = channel();
+spawn { 
+  let prev = 0;
+  while (true) {
+    s.send(prev);
+    prev += 1;
+  }
+}
+
+let i = 0;
+while (true) {
+  let x = r.recv();
+  assert!(x == i);
+  i += 1;
+}

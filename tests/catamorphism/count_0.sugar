@@ -1,0 +1,24 @@
+if (n >= 0) {
+let s, r = channel();
+spawn {
+  let i = 0;
+  while (i < n) {
+    s.send(0);
+    i += 1;
+  }
+}
+
+let i = 0;
+let count_zero = 0;
+
+while (i < n) {
+  //verify!(count_zero + count(@r, |x| x == 0) == n);
+  let x = r.recv();
+  if (x == 0) {
+    count_zero += 1;
+  }
+  i += 1;
+}
+
+assert!(count_zero == n);
+}
