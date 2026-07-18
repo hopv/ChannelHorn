@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
-use channel_rust_impl::chc;
-use channel_rust_impl::core::{eval, parser};
-use channel_rust_impl::sugar;
+use channel_horn::chc;
+use channel_horn::core::{eval, parser};
+use channel_horn::sugar;
 use clap::Parser;
 
 #[derive(Parser, Debug)]

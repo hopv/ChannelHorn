@@ -4,7 +4,7 @@ use std::{
     process::{Command, Output},
 };
 
-use channel_rust_impl::{
+use channel_horn::{
     chc::{CheckMode, Setting},
     parser,
 };
@@ -223,10 +223,7 @@ fn run_benchmark(
         .lower_to_chc(setting.clone())
         .map_err(|err| format!("{rel_path}: failed to lower benchmark to CHC: {err}"))?;
 
-    let temp_dir = env::temp_dir().join(format!(
-        "channel_rust_impl_chc_bench_{}",
-        std::process::id()
-    ));
+    let temp_dir = env::temp_dir().join(format!("channel_horn_chc_bench_{}", std::process::id()));
     fs::create_dir_all(&temp_dir)
         .map_err(|err| format!("{rel_path}: failed to create temp directory: {err}"))?;
     let safe_name = sanitize_path(&rel_path);
