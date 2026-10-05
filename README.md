@@ -2,8 +2,7 @@
 
 ChannelHorn translates message-passing concurrent programs into
 constrained Horn clauses (CHCs) in SMT-LIB 2 format. By default, it generates
-clauses for checking whether a `fail` statement is reachable. It can also
-generate clauses for deadlock-freedom checking.
+clauses for checking whether a `fail` statement is reachable.
 
 ## Requirements
 
